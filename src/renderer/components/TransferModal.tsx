@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { FileInfo } from '../../shared/types';
+import { UploadProgress } from '../api';
 
 interface TransferModalProps {
   deviceId: string;
@@ -9,19 +10,40 @@ interface TransferModalProps {
 export default function TransferModal({ deviceId, onClose }: TransferModalProps) {
   const [files, setFiles] = useState<FileInfo[]>([]);
   const [isSending, setIsSending] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const [sendStatus, setSendStatus] = useState<'idle' | 'uploading' | 'sent' | 'error'>('idle');
 
   const handleSelectFiles = async () => {
-    const selected = await window.lightningshare.selectFiles();
-    if (selected.length > 0) {
-      setFiles(selected);
+    setIsUploading(true);
+    setUploadError(null);
+    try {
+      const selected = await window.lightningshare.selectFiles(setUploadProgress);
+      if (selected.length > 0) {
+        setFiles(selected);
+      }
+    } catch (error) {
+      setUploadError(error instanceof Error ? error.message : 'Upload failed');
+    } finally {
+      setIsUploading(false);
+      setUploadProgress(null);
     }
   };
 
   const handleSelectFolder = async () => {
-    const folderFiles = await window.lightningshare.selectFolder();
-    if (folderFiles && folderFiles.length > 0) {
-      setFiles(folderFiles);
+    setIsUploading(true);
+    setUploadError(null);
+    try {
+      const folderFiles = await window.lightningshare.selectFolder(setUploadProgress);
+      if (folderFiles && folderFiles.length > 0) {
+        setFiles(folderFiles);
+      }
+    } catch (error) {
+      setUploadError(error instanceof Error ? error.message : 'Upload failed');
+    } finally {
+      setIsUploading(false);
+      setUploadProgress(null);
     }
   };
 
@@ -110,6 +132,36 @@ export default function TransferModal({ deviceId, onClose }: TransferModalProps)
                 Sending transfer request to device...
               </p>
             </div>
+          ) : isUploading ? (
+            <div className="py-8">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-lg font-medium text-slate-900">Uploading files...</h3>
+                <span className="text-sm font-semibold text-primary-600">
+                  {Math.round(uploadProgress?.percentage || 0)}%
+                </span>
+              </div>
+              <div
+                className="h-3 w-full overflow-hidden rounded-full bg-slate-100"
+                role="progressbar"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={Math.round(uploadProgress?.percentage || 0)}
+              >
+                <div
+                  className="h-full rounded-full bg-primary-600 transition-[width] duration-150"
+                  style={{ width: `${Math.min(uploadProgress?.percentage || 0, 100)}%` }}
+                />
+              </div>
+              <div className="mt-3 flex items-center justify-between text-xs text-slate-500">
+                <span className="truncate pr-3">{uploadProgress?.fileName || 'Preparing files...'}</span>
+                <span className="shrink-0">
+                  {uploadProgress?.currentFile || 0}/{uploadProgress?.totalFiles || 0} files
+                </span>
+              </div>
+              <p className="mt-2 text-center text-sm text-slate-500">
+                {formatBytes(uploadProgress?.loaded || 0)} of {formatBytes(uploadProgress?.total || 0)} uploaded
+              </p>
+            </div>
           ) : files.length === 0 ? (
             <div className="space-y-3">
               <button
@@ -131,6 +183,9 @@ export default function TransferModal({ deviceId, onClose }: TransferModalProps)
                 </svg>
                 Select Folder
               </button>
+              {uploadError && (
+                <p className="text-sm text-center text-red-500">{uploadError}</p>
+              )}
             </div>
           ) : (
             <div>

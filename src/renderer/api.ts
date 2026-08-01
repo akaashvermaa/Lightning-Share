@@ -13,6 +13,17 @@ let ws: WebSocket | null = null;
 let wsReady: Promise<WebSocket> | null = null;
 const wsEventHandlers = new Map<string, Set<Function>>();
 
+export interface UploadProgress {
+  loaded: number;
+  total: number;
+  percentage: number;
+  currentFile: number;
+  totalFiles: number;
+  fileName: string;
+}
+
+type UploadProgressCallback = (progress: UploadProgress) => void;
+
 function connectWS(): Promise<WebSocket> {
   if (ws && ws.readyState === WebSocket.OPEN) {
     return Promise.resolve(ws);
@@ -86,23 +97,82 @@ async function apiPost<T>(pathSuffix: string, body?: any): Promise<T> {
   return res.json();
 }
 
-async function uploadFile(file: File): Promise<FileInfo> {
-  const formData = new FormData();
-  formData.append('file', file);
+function uploadFile(
+  file: File,
+  onProgress: (loaded: number) => void,
+): Promise<FileInfo> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `${API_BASE}/api/upload`);
+    xhr.setRequestHeader('X-File-Name', file.name);
+    xhr.setRequestHeader('X-File-Size', String(file.size));
+    xhr.setRequestHeader('X-File-Id', crypto.randomUUID());
+    xhr.setRequestHeader('X-Mime-Type', file.type || 'application/octet-stream');
 
-  const res = await fetch(`${API_BASE}/api/upload`, {
-    method: 'POST',
-    headers: {
-      'X-File-Name': file.name,
-      'X-File-Size': String(file.size),
-      'X-File-Id': crypto.randomUUID(),
-      'X-Mime-Type': file.type || 'application/octet-stream',
-    },
-    body: file,
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) {
+        onProgress(event.loaded);
+      }
+    };
+
+    xhr.onload = () => {
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(new Error(`Upload failed: HTTP ${xhr.status}`));
+        return;
+      }
+
+      try {
+        onProgress(file.size);
+        resolve(JSON.parse(xhr.responseText) as FileInfo);
+      } catch (error) {
+        reject(error);
+      }
+    };
+
+    xhr.onerror = () => reject(new Error(`Upload failed for ${file.name}`));
+    xhr.onabort = () => reject(new Error(`Upload cancelled for ${file.name}`));
+    xhr.send(file);
+  });
+}
+
+async function uploadFiles(
+  files: File[],
+  onProgress?: UploadProgressCallback,
+): Promise<FileInfo[]> {
+  const loadedByFile = files.map(() => 0);
+  const total = files.reduce((sum, file) => sum + file.size, 0);
+
+  const reportProgress = (fileIndex: number) => {
+    const loaded = loadedByFile.reduce((sum, bytes) => sum + bytes, 0);
+    onProgress?.({
+      loaded,
+      total,
+      percentage: total > 0 ? (loaded / total) * 100 : 100,
+      currentFile: fileIndex + 1,
+      totalFiles: files.length,
+      fileName: files[fileIndex].name,
+    });
+  };
+
+  onProgress?.({
+    loaded: 0,
+    total,
+    percentage: total > 0 ? 0 : 100,
+    currentFile: 1,
+    totalFiles: files.length,
+    fileName: files[0]?.name || '',
   });
 
-  if (!res.ok) throw new Error('Upload failed');
-  return res.json();
+  return Promise.all(files.map((file, index) =>
+    uploadFile(file, (loaded) => {
+      loadedByFile[index] = Math.min(loaded, file.size);
+      reportProgress(index);
+    }).then((fileInfo) => {
+      loadedByFile[index] = file.size;
+      reportProgress(index);
+      return fileInfo;
+    })
+  ));
 }
 
 function pickFiles_helper(multiple: boolean): Promise<File[]> {
@@ -176,18 +246,16 @@ export const lightningshareAPI = {
   selectDownloadPath: () =>
     apiGet<{ path: string }>('/download-path').then((r) => r.path),
 
-  selectFiles: async (): Promise<FileInfo[]> => {
+  selectFiles: async (onProgress?: UploadProgressCallback): Promise<FileInfo[]> => {
     const files = await pickFiles_helper(true);
     if (files.length === 0) return [];
-    const fileInfos = await Promise.all(files.map((f) => uploadFile(f)));
-    return fileInfos;
+    return uploadFiles(files, onProgress);
   },
 
-  selectFolder: async (): Promise<FileInfo[] | null> => {
+  selectFolder: async (onProgress?: UploadProgressCallback): Promise<FileInfo[] | null> => {
     const files = await pickFolder_helper();
     if (files.length === 0) return null;
-    const fileInfos = await Promise.all(files.map((f) => uploadFile(f)));
-    return fileInfos;
+    return uploadFiles(files, onProgress);
   },
 
   startTransfer: async (

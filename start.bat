@@ -8,24 +8,12 @@ echo.
 
 cd /d "%~dp0"
 
-if not exist "dist\server\server\index.js" (
-  echo  [BUILD] Building server... first time only
-  call npm run build:server
-  if errorlevel 1 (
-    echo  [ERROR] Server build failed!
-    pause
-    exit /b 1
-  )
-)
-
-if not exist "dist\renderer\index.html" (
-  echo  [BUILD] Building UI... first time only
-  call npm run build:vite
-  if errorlevel 1 (
-    echo  [ERROR] UI build failed!
-    pause
-    exit /b 1
-  )
+echo  [BUILD] Building the latest server and UI sources...
+call npm run build
+if errorlevel 1 (
+  echo  [ERROR] Build failed! The server was not started.
+  pause
+  exit /b 1
 )
 
 echo  [START] Server starting on port 51236...

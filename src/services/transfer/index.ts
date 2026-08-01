@@ -17,6 +17,7 @@ import {
   TRANSFER_PORT,
   MAX_CHUNK_RETRIES,
   RETRY_DELAY,
+  TRANSFER_WINDOW_SIZE,
   getChunkSizeForFile,
 } from '../../shared/constants';
 
@@ -33,6 +34,9 @@ interface PendingTransfer {
   socket: tls.TLSSocket | net.Socket;
 }
 
+const CONTROL_FRAME = 0;
+const CHUNK_FRAME = 1;
+
 function parseMessage(data: Buffer): any {
   return JSON.parse(data.toString(), (key, value) => {
     if (value && typeof value === 'object' && value.type === 'Buffer' && Array.isArray(value.data)) {
@@ -40,6 +44,60 @@ function parseMessage(data: Buffer): any {
     }
     return value;
   });
+}
+
+function encodeFrame(message: any): Buffer {
+  let payload: Buffer;
+
+  if (message.type === 'chunk' && Buffer.isBuffer(message.data)) {
+    const { data, ...header } = message;
+    const headerBuffer = Buffer.from(JSON.stringify({
+      ...header,
+      dataLength: data.length,
+    }));
+    const frameHeader = Buffer.alloc(5);
+    frameHeader[0] = CHUNK_FRAME;
+    frameHeader.writeUInt32BE(headerBuffer.length, 1);
+    payload = Buffer.concat([frameHeader, headerBuffer, data]);
+  } else {
+    payload = Buffer.concat([
+      Buffer.from([CONTROL_FRAME]),
+      Buffer.from(JSON.stringify(message)),
+    ]);
+  }
+
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(payload.length);
+  return Buffer.concat([length, payload]);
+}
+
+function decodeFrame(frame: Buffer): any {
+  if (frame.length < 1) {
+    throw new Error('Transfer frame is empty');
+  }
+
+  if (frame[0] === CONTROL_FRAME) {
+    return parseMessage(frame.subarray(1));
+  }
+
+  if (frame[0] !== CHUNK_FRAME || frame.length < 5) {
+    throw new Error(`Unknown transfer frame type: ${frame[0]}`);
+  }
+
+  const headerLength = frame.readUInt32BE(1);
+  const headerStart = 5;
+  const dataStart = headerStart + headerLength;
+  if (dataStart > frame.length) {
+    throw new Error('Transfer chunk header exceeds frame length');
+  }
+
+  const header = JSON.parse(frame.subarray(headerStart, dataStart).toString());
+  const data = frame.subarray(dataStart);
+  if (header.dataLength !== data.length) {
+    throw new Error(`Transfer chunk length mismatch: expected ${header.dataLength}, got ${data.length}`);
+  }
+
+  return { ...header, data };
 }
 
 function errorDetails(error: unknown): string {
@@ -147,10 +205,13 @@ export class TransferService extends EventEmitter {
         buffer = buffer.slice(4 + messageLength);
 
         try {
-          const message = parseMessage(messageData);
-          log.info(`[TRACE] RECEIVER MESSAGE ${message.type} START session=${message.sessionId || 'unknown'}`);
+          const message = decodeFrame(messageData);
+          const messageLog = message.type === 'chunk' || message.type === 'ack'
+            ? log.debug.bind(log)
+            : log.info.bind(log);
+          messageLog(`[TRACE] RECEIVER MESSAGE ${message.type} START session=${message.sessionId || 'unknown'}`);
           await this.handleMessage(socket, message);
-          log.info(`[TRACE] RECEIVER MESSAGE ${message.type} SUCCESS session=${message.sessionId || 'unknown'}`);
+          messageLog(`[TRACE] RECEIVER MESSAGE ${message.type} SUCCESS session=${message.sessionId || 'unknown'}`);
         } catch (err) {
           log.error(`[TRACE] RECEIVER MESSAGE ERROR ${remoteAddress}:\n${errorDetails(err)}`);
           socket.destroy(err instanceof Error ? err : new Error(String(err)));
@@ -170,7 +231,10 @@ export class TransferService extends EventEmitter {
   }
 
   private async handleMessage(socket: tls.TLSSocket | net.Socket, message: any): Promise<void> {
-    log.info(`[TRACE] ENTER handleMessage type=${message.type} session=${message.sessionId || 'unknown'}`);
+    const messageLog = message.type === 'chunk' || message.type === 'ack'
+      ? log.debug.bind(log)
+      : log.info.bind(log);
+    messageLog(`[TRACE] ENTER handleMessage type=${message.type} session=${message.sessionId || 'unknown'}`);
     switch (message.type) {
       case 'request':
         await this.handleTransferRequest(socket, message);
@@ -197,7 +261,7 @@ export class TransferService extends EventEmitter {
         await this.handleError(socket, message);
         break;
     }
-    log.info(`[TRACE] EXIT handleMessage type=${message.type} session=${message.sessionId || 'unknown'}`);
+    messageLog(`[TRACE] EXIT handleMessage type=${message.type} session=${message.sessionId || 'unknown'}`);
   }
 
   private async handleTransferRequest(socket: net.Socket, message: any): Promise<void> {
@@ -253,9 +317,13 @@ export class TransferService extends EventEmitter {
     }
 
     const { fileId, chunkIndex, offset, data, checksum } = message;
-    log.info(`[RECV_CHUNK] chunk ${chunkIndex} for file ${fileId}, offset=${offset}, dataLen=${data?.length || data?.data?.length || 0}`);
+    log.debug(`[RECV_CHUNK] chunk ${chunkIndex} for file ${fileId}, offset=${offset}, dataLen=${data?.length || data?.data?.length || 0}`);
 
-    const chunkBuffer: Buffer = Buffer.isBuffer(data) ? data : Buffer.from(data.data || data);
+    const chunkBuffer: Buffer = Buffer.isBuffer(data)
+      ? data
+      : message.dataEncoding === 'base64' && typeof data === 'string'
+      ? Buffer.from(data, 'base64')
+      : Buffer.from(data.data || data);
 
     const isValid = await this.fileService.verifyChunkChecksum(chunkBuffer, checksum);
     if (!isValid) {
@@ -311,9 +379,9 @@ export class TransferService extends EventEmitter {
     const session = this.sessions.get(message.sessionId);
     if (!session) return;
 
-    log.info(`[RECV_ACK] chunk ${message.chunkIndex} valid=${message.valid} for session ${message.sessionId}`);
+    log.debug(`[RECV_ACK] chunk ${message.chunkIndex} valid=${message.valid} for session ${message.sessionId}`);
 
-    const connectionKey = `${socket.remoteAddress}:${socket.remotePort}`;
+    const connectionKey = `${socket.remoteAddress}:${socket.remotePort}:${message.chunkIndex}`;
     const connection = this.connections.get(connectionKey);
 
     if (!message.valid) {
@@ -335,12 +403,15 @@ export class TransferService extends EventEmitter {
 
     if (connection) {
       connection.retries = 0;
+      this.connections.delete(connectionKey);
     }
+    const inFlightChunks: Set<number> = (session as any).inFlightChunks || new Set<number>();
+    inFlightChunks.delete(message.chunkIndex);
     session.acknowledgedChunks.add(message.chunkIndex);
     session.lastAcknowledgedByte = message.acknowledgedByte;
 
     this.updateProgress(session);
-    await this.sendNextChunk(session, socket);
+    await this.fillSendWindow(session, socket);
   }
 
   private async handleComplete(socket: net.Socket, message: any): Promise<void> {
@@ -408,7 +479,7 @@ export class TransferService extends EventEmitter {
 
     log.info(`Resuming session ${session.id} from byte ${lastAcknowledgedByte}`);
     this.emitSessionUpdate(session);
-    await this.startSendingChunks(session, socket);
+    await this.startSendingChunks(session, socket, true);
   }
 
   private async handleError(socket: net.Socket, message: any): Promise<void> {
@@ -445,7 +516,11 @@ export class TransferService extends EventEmitter {
     return stream;
   }
 
-  private async startSendingChunks(session: TransferSession, socket: net.Socket): Promise<void> {
+  private async startSendingChunks(
+    session: TransferSession,
+    socket: net.Socket,
+    isResume = false,
+  ): Promise<void> {
     const currentFileIndex = (session as any).currentFileIndex || 0;
     const fileInfo = session.files[currentFileIndex];
     if (!fileInfo) {
@@ -457,18 +532,23 @@ export class TransferService extends EventEmitter {
 
     const chunks = this.fileService.createChunks(fileInfo.size, fileInfo.id);
     session.chunks = chunks;
-    session.acknowledgedChunks = new Set();
-    session.lastAcknowledgedByte = 0;
+    if (!isResume) {
+      session.acknowledgedChunks = new Set();
+      session.lastAcknowledgedByte = 0;
+    }
+    (session as any).inFlightChunks = new Set<number>();
 
     (session as any).currentFileIndex = currentFileIndex;
     (session as any).fileProgress = (session as any).fileProgress || {};
-    (session as any).fileProgress[fileInfo.id] = {
-      transferred: 0,
-      completed: false,
-    };
+    if (!isResume || !(session as any).fileProgress[fileInfo.id]) {
+      (session as any).fileProgress[fileInfo.id] = {
+        transferred: 0,
+        completed: false,
+      };
+    }
 
     log.info(`Starting to send ${fileInfo.name} (${fileInfo.size} bytes, ${chunks.length} chunks)`);
-    await this.sendNextChunk(session, socket);
+    await this.fillSendWindow(session, socket);
   }
 
   private async readChunkData(filePath: string, offset: number, size: number): Promise<Buffer | null> {
@@ -484,12 +564,32 @@ export class TransferService extends EventEmitter {
     }
   }
 
+  private async fillSendWindow(session: TransferSession, socket: net.Socket): Promise<void> {
+    const inFlightChunks: Set<number> = (session as any).inFlightChunks || new Set<number>();
+    (session as any).inFlightChunks = inFlightChunks;
+
+    while (
+      inFlightChunks.size < TRANSFER_WINDOW_SIZE &&
+      session.status !== 'completed' &&
+      session.status !== 'failed' &&
+      session.status !== 'cancelled'
+    ) {
+      const previousInFlight = inFlightChunks.size;
+      await this.sendNextChunk(session, socket);
+      if (inFlightChunks.size === previousInFlight) break;
+    }
+  }
+
   private async sendNextChunk(session: TransferSession, socket: net.Socket): Promise<void> {
+    const inFlightChunks: Set<number> = (session as any).inFlightChunks || new Set<number>();
+    (session as any).inFlightChunks = inFlightChunks;
     const unacknowledged = session.chunks.find(
-      c => !session.acknowledgedChunks.has(c.index)
+      c => !session.acknowledgedChunks.has(c.index) && !inFlightChunks.has(c.index)
     );
 
     if (!unacknowledged) {
+      if (inFlightChunks.size > 0) return;
+
       const currentFileIndex = (session as any).currentFileIndex || 0;
       const fileInfo = session.files[currentFileIndex];
 
@@ -511,6 +611,7 @@ export class TransferService extends EventEmitter {
         const nextFile = session.files[nextFileIndex];
         session.chunks = this.fileService.createChunks(nextFile.size, nextFile.id);
         session.acknowledgedChunks = new Set();
+        (session as any).inFlightChunks = new Set<number>();
         session.lastAcknowledgedByte = 0;
         (session as any).fileProgress[nextFile.id] = {
           transferred: 0,
@@ -540,6 +641,8 @@ export class TransferService extends EventEmitter {
 
     const checksum = await this.fileService.calculateChunkChecksum(chunkData);
 
+    inFlightChunks.add(unacknowledged.index);
+
     this.sendMessage(socket, {
       type: 'chunk',
       sessionId: session.id,
@@ -550,7 +653,7 @@ export class TransferService extends EventEmitter {
       checksum,
     });
 
-    const connKey = `${socket.remoteAddress}:${socket.remotePort}`;
+    const connKey = `${socket.remoteAddress}:${socket.remotePort}:${unacknowledged.index}`;
     this.connections.set(connKey, {
       socket,
       sessionId: session.id,
@@ -622,17 +725,17 @@ export class TransferService extends EventEmitter {
       return;
     }
     try {
-      log.info(`[TRACE] SEND ${message.type} START session=${message.sessionId || 'unknown'} socket=${remoteAddr}`);
-      const data = Buffer.from(JSON.stringify(message));
-      const lengthBuffer = Buffer.alloc(4);
-      lengthBuffer.writeUInt32BE(data.length);
-      const frame = Buffer.concat([lengthBuffer, data]);
+      const messageLog = message.type === 'chunk' || message.type === 'ack'
+        ? log.debug.bind(log)
+        : log.info.bind(log);
+      messageLog(`[TRACE] SEND ${message.type} START session=${message.sessionId || 'unknown'} socket=${remoteAddr}`);
+      const frame = encodeFrame(message);
       socket.write(frame, (err) => {
         if (err) {
           log.error(`[TRACE] SEND ${message.type} ERROR socket=${remoteAddr}:\n${errorDetails(err)}`);
           return;
         }
-        log.info(`[TRACE] SEND ${message.type} SUCCESS session=${message.sessionId || 'unknown'} socket=${remoteAddr} bytes=${data.length}`);
+        messageLog(`[TRACE] SEND ${message.type} SUCCESS session=${message.sessionId || 'unknown'} socket=${remoteAddr} bytes=${frame.length}`);
       });
     } catch (err) {
       log.error(`[TRACE] SEND ${message.type} ERROR socket=${remoteAddr}:\n${errorDetails(err)}`);
@@ -741,7 +844,7 @@ export class TransferService extends EventEmitter {
           const messageData = buffer.slice(4, 4 + messageLength);
           buffer = buffer.slice(4 + messageLength);
           try {
-            const message = parseMessage(messageData);
+            const message = decodeFrame(messageData);
             await this.handleMessage(socket, message);
           } catch (err) {
             log.error(`[TRACE] SENDER MESSAGE ERROR session=${sessionId}:\n${errorDetails(err)}`);
