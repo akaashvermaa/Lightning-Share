@@ -84,6 +84,7 @@ export const useTransferStore = create<TransferState>((set, get) => ({
         id: sessionId,
         deviceId: incoming.deviceId,
         deviceName: incoming.deviceName,
+        deviceIp: '',
         files: incoming.files,
         totalSize: incoming.totalSize,
         transferredBytes: 0,

@@ -576,6 +576,7 @@ export class TransferService extends EventEmitter {
       id: sessionId,
       deviceId: device.id,
       deviceName: device.name,
+      deviceIp: device.ip,
       files,
       totalSize,
       transferredBytes: 0,
@@ -615,11 +616,32 @@ export class TransferService extends EventEmitter {
         });
       });
 
+      let buffer = Buffer.alloc(0);
+      socket.on('data', async (data) => {
+        buffer = Buffer.concat([buffer, data]);
+        while (buffer.length >= 4) {
+          const messageLength = buffer.readUInt32BE(0);
+          if (buffer.length < 4 + messageLength) break;
+          const messageData = buffer.slice(4, 4 + messageLength);
+          buffer = buffer.slice(4 + messageLength);
+          try {
+            const message = parseMessage(messageData);
+            await this.handleMessage(socket, message);
+          } catch (err) {
+            log.error('Failed to parse transfer message on outgoing socket:', err);
+          }
+        }
+      });
+
       socket.on('error', (err) => {
         log.error(`TLS connection error to ${device.ip}:`, err);
         session.status = 'failed';
         session.error = err.message;
         this.emit('session-error', session.id, err.message);
+      });
+
+      socket.on('close', () => {
+        log.info(`Outgoing TLS connection closed for session ${sessionId}`);
       });
     }
 
@@ -648,6 +670,7 @@ export class TransferService extends EventEmitter {
       id: sessionId,
       deviceId: incoming.deviceId,
       deviceName: incoming.deviceName,
+      deviceIp: socket.remoteAddress || '',
       files: incoming.files,
       totalSize: incoming.totalSize,
       transferredBytes: 0,
@@ -758,7 +781,7 @@ export class TransferService extends EventEmitter {
       log.info(`Attempting to reconnect session ${session.id}`);
 
       const options: tls.ConnectionOptions = {
-        host: session.deviceId,
+        host: session.deviceIp,
         port: TRANSFER_PORT,
         rejectUnauthorized: false,
       };

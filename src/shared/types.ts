@@ -28,6 +28,7 @@ export interface TransferSession {
   id: string;
   deviceId: string;
   deviceName: string;
+  deviceIp: string;
   files: FileInfo[];
   totalSize: number;
   transferredBytes: number;

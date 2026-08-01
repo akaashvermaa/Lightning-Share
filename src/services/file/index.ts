@@ -121,9 +121,8 @@ export class FileService {
 
   async calculateFileChecksum(filePath: string): Promise<string> {
     return new Promise((resolve, reject) => {
-      const hash = createHash('blake3');
+      const hash = createHash('sha256');
       const stream = fs.createReadStream(filePath);
-
       stream.on('data', (data) => hash.update(data));
       stream.on('end', () => resolve(hash.digest('hex')));
       stream.on('error', reject);
@@ -131,11 +130,9 @@ export class FileService {
   }
 
   async calculateChunkChecksum(chunk: Buffer): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const hash = createHash('blake3');
-      hash.update(chunk);
-      resolve(hash.digest('hex'));
-    });
+    const hash = createHash('sha256');
+    hash.update(chunk);
+    return hash.digest('hex');
   }
 
   async verifyChunkChecksum(chunk: Buffer, expectedChecksum: string): Promise<boolean> {

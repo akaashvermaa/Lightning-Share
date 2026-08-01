@@ -1,5 +1,7 @@
 import * as dgram from 'dgram';
 import * as os from 'os';
+import * as fs from 'fs';
+import * as path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { EventEmitter } from 'events';
 import log from '../../shared/logger';
@@ -9,6 +11,9 @@ import {
   DISCOVERY_INTERVAL,
   DISCOVERY_TIMEOUT,
 } from '../../shared/constants';
+
+const DATA_DIR = path.join(os.homedir(), '.lightningshare');
+const DEVICE_ID_FILE = path.join(DATA_DIR, 'device-id');
 
 export class DiscoveryService extends EventEmitter {
   private deviceId: string;
@@ -23,9 +28,30 @@ export class DiscoveryService extends EventEmitter {
 
   constructor() {
     super();
-    this.deviceId = uuidv4();
+    this.deviceId = this.loadOrCreateDeviceId();
     this.deviceName = os.hostname();
     this.localIp = this.getLocalIp();
+  }
+
+  private loadOrCreateDeviceId(): string {
+    try {
+      if (!fs.existsSync(DATA_DIR)) {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+      }
+      if (fs.existsSync(DEVICE_ID_FILE)) {
+        const id = fs.readFileSync(DEVICE_ID_FILE, 'utf8').trim();
+        if (id) return id;
+      }
+    } catch (err) {
+      log.warn('Failed to load device ID:', err);
+    }
+    const newId = uuidv4();
+    try {
+      fs.writeFileSync(DEVICE_ID_FILE, newId, 'utf8');
+    } catch (err) {
+      log.warn('Failed to persist device ID:', err);
+    }
+    return newId;
   }
 
   private getLocalIp(): string {
@@ -51,7 +77,14 @@ export class DiscoveryService extends EventEmitter {
     this.socket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
     this.broadcaster = dgram.createSocket({ type: 'udp4', reuseAddr: true });
 
+    this.broadcaster.on('error', (err) => {
+      log.error('Broadcaster socket error:', err);
+    });
+
     await this.bindSocket();
+    this.broadcaster.bind(() => {
+      this.broadcaster?.setBroadcast(true);
+    });
     this.startBroadcasting();
     this.startCleanup();
 
@@ -190,6 +223,17 @@ export class DiscoveryService extends EventEmitter {
       };
 
       const isNew = !this.devices.has(message.deviceId);
+
+      // Deduplicate by IP: if a different deviceId from the same IP exists, remove it.
+      // This handles cases where a device restarted and got a new deviceId before
+      // the old one timed out.
+      for (const [existingId, existingDevice] of this.devices) {
+        if (existingDevice.ip === rinfo.address && existingId !== message.deviceId) {
+          this.devices.delete(existingId);
+          this.emit('device-left', existingId);
+          log.info(`Removing stale device entry for ${existingDevice.name} at ${existingDevice.ip} (duplicate IP, new ID ${message.deviceId})`);
+        }
+      }
 
       this.devices.set(message.deviceId, device);
 
