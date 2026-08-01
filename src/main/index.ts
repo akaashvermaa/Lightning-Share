@@ -7,6 +7,7 @@ import { setupIpcHandlers } from './ipc';
 import { DiscoveryService } from '../services/discovery';
 import { TransferService } from '../services/transfer';
 import { FileService } from '../services/file';
+import { networkMonitor } from '../services/network';
 
 log.initialize();
 log.transports.file.level = 'info';
@@ -31,6 +32,26 @@ async function initializeServices(): Promise<void> {
   fileService = new FileService();
   transferService = new TransferService(fileService);
   discoveryService = new DiscoveryService();
+
+  networkMonitor.start();
+
+  networkMonitor.on('network-change', (event) => {
+    log.info(`Network change: ${event.type} on ${event.interface}`);
+    const win = BrowserWindow.getFocusedWindow();
+    if (win) {
+      win.webContents.send('network-change', {
+        type: event.type,
+        interface: event.interface,
+        address: event.address,
+        oldAddress: event.oldAddress,
+      });
+    }
+
+    if (event.type === 'changed' || event.type === 'added') {
+      discoveryService.updateLocalIp(event.address || '');
+      transferService.handleNetworkChange(event.address);
+    }
+  });
 
   await discoveryService.start();
   log.info('Services initialized');
@@ -60,6 +81,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', async () => {
   log.info('App quitting...');
+  networkMonitor.stop();
   if (discoveryService) {
     await discoveryService.stop();
   }

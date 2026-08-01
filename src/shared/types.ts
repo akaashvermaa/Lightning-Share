@@ -41,6 +41,12 @@ export interface TransferSession {
   chunks: ChunkInfo[];
   acknowledgedChunks: Set<number>;
   lastAcknowledgedByte: number;
+  speedHistory: SpeedSample[];
+}
+
+export interface SpeedSample {
+  timestamp: number;
+  bytesPerSecond: number;
 }
 
 export type TransferStatus =

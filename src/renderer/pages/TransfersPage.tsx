@@ -1,4 +1,5 @@
 import { useTransferStore } from '../stores/transferStore';
+import SpeedGraph, { formatSpeed } from '../components/SpeedGraph';
 
 export default function TransfersPage() {
   const { sessions } = useTransferStore();
@@ -152,12 +153,17 @@ function TransferCard({ session }: { session: any }) {
 
       <div className="mb-2">
         <div className="flex items-center justify-between text-sm mb-1">
-          <span className="text-slate-600">
-            {isActive && `${formatBytes(session.speed)}/s`}
-            {isPaused && 'Paused'}
-            {isCompleted && 'Completed'}
-            {!isActive && !isPaused && !isCompleted && session.status}
-          </span>
+          <div className="flex items-center gap-3">
+            <span className="text-slate-600">
+              {isActive && formatSpeed(session.speed)}
+              {isPaused && 'Paused'}
+              {isCompleted && 'Completed'}
+              {!isActive && !isPaused && !isCompleted && session.status}
+            </span>
+            {isActive && session.speedHistory.length > 1 && (
+              <SpeedGraph data={session.speedHistory} width={100} height={24} />
+            )}
+          </div>
           <span className="text-slate-500">
             {formatBytes(session.transferredBytes)} / {formatBytes(session.totalSize)}
           </span>

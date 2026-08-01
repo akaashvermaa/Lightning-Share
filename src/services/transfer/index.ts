@@ -1,4 +1,5 @@
 import * as net from 'net';
+import * as tls from 'tls';
 import * as fs from 'fs';
 import * as path from 'path';
 import { EventEmitter } from 'events';
@@ -15,6 +16,7 @@ import {
   ResumePayload,
 } from '../../shared/types';
 import { FileService } from '../file';
+import { certificateManager } from './certificate';
 import {
   TRANSFER_PORT,
   MAX_CHUNK_RETRIES,
@@ -23,7 +25,7 @@ import {
 } from '../../shared/constants';
 
 interface ActiveConnection {
-  socket: net.Socket;
+  socket: tls.TLSSocket | net.Socket;
   sessionId: string;
   fileId: string;
   chunkIndex: number;
@@ -32,11 +34,12 @@ interface ActiveConnection {
 
 export class TransferService extends EventEmitter {
   private sessions: Map<string, TransferSession> = new Map();
-  private server: net.Server | null = null;
+  private server: tls.Server | null = null;
   private fileService: FileService;
   private connections: Map<string, ActiveConnection> = new Map();
   private pendingTransfers: Map<string, IncomingTransfer> = new Map();
   private writeStreams: Map<string, fs.WriteStream> = new Map();
+  private serverSocket: net.Server | null = null;
 
   constructor(fileService: FileService) {
     super();
@@ -45,20 +48,29 @@ export class TransferService extends EventEmitter {
   }
 
   private async startServer(): Promise<void> {
-    this.server = net.createServer((socket) => {
+    const certInfo = await certificateManager.getCertificate();
+
+    const options = {
+      key: fs.readFileSync(certInfo.keyPath),
+      cert: fs.readFileSync(certInfo.certPath),
+      rejectUnauthorized: false,
+      handshakeTimeout: 10000,
+    };
+
+    this.server = tls.createServer(options, (socket) => {
       this.handleConnection(socket);
     });
 
     this.server.listen(TRANSFER_PORT, '0.0.0.0', () => {
-      log.info(`Transfer server listening on port ${TRANSFER_PORT}`);
+      log.info(`TLS transfer server listening on port ${TRANSFER_PORT}`);
     });
 
     this.server.on('error', (err) => {
-      log.error('Transfer server error:', err);
+      log.error('TLS server error:', err);
     });
   }
 
-  private handleConnection(socket: net.Socket): void {
+  private handleConnection(socket: tls.TLSSocket | net.Socket): void {
     const remoteAddress = `${socket.remoteAddress}:${socket.remotePort}`;
     log.info(`New transfer connection from ${remoteAddress}`);
 
@@ -92,7 +104,7 @@ export class TransferService extends EventEmitter {
     });
   }
 
-  private async handleMessage(socket: net.Socket, message: any): Promise<void> {
+  private async handleMessage(socket: tls.TLSSocket | net.Socket, message: any): Promise<void> {
     switch (message.type) {
       case 'request':
         await this.handleTransferRequest(socket, message);
@@ -408,6 +420,18 @@ export class TransferService extends EventEmitter {
           session.remainingTime = (session.totalSize - session.transferredBytes) / session.speed;
         }
 
+        const now = Date.now();
+        if (session.speedHistory.length === 0 ||
+            now - session.speedHistory[session.speedHistory.length - 1].timestamp >= 500) {
+          session.speedHistory.push({
+            timestamp: now,
+            bytesPerSecond: session.speed,
+          });
+          if (session.speedHistory.length > 60) {
+            session.speedHistory.shift();
+          }
+        }
+
         this.emitSessionUpdate(session);
         return;
       }
@@ -563,7 +587,7 @@ export class TransferService extends EventEmitter {
     });
   }
 
-  private sendMessage(socket: net.Socket, message: any): void {
+  private sendMessage(socket: tls.TLSSocket | net.Socket, message: any): void {
     const data = Buffer.from(JSON.stringify(message));
     const lengthBuffer = Buffer.alloc(4);
     lengthBuffer.writeUInt32BE(data.length);
@@ -610,16 +634,21 @@ export class TransferService extends EventEmitter {
       chunks: [],
       acknowledgedChunks: new Set(),
       lastAcknowledgedByte: 0,
+      speedHistory: [],
     };
 
     this.sessions.set(sessionId, session);
     log.info(`Created transfer session ${sessionId} with ${device.name}`);
 
     if (direction === 'sending') {
-      const socket = new net.Socket();
+      const options: tls.ConnectionOptions = {
+        host: device.ip,
+        port: device.port,
+        rejectUnauthorized: false,
+      };
 
-      socket.connect(device.port, device.ip, () => {
-        log.info(`Connected to ${device.ip}:${device.port} for transfer`);
+      const socket = tls.connect(options, () => {
+        log.info(`TLS connected to ${device.ip}:${device.port} for transfer`);
         session.status = 'connecting';
         this.emitSessionUpdate(session);
 
@@ -634,7 +663,7 @@ export class TransferService extends EventEmitter {
       });
 
       socket.on('error', (err) => {
-        log.error(`Connection error to ${device.ip}:`, err);
+        log.error(`TLS connection error to ${device.ip}:`, err);
         session.status = 'failed';
         session.error = err.message;
         this.emit('session-error', session.id, err.message);
@@ -671,6 +700,7 @@ export class TransferService extends EventEmitter {
       chunks: [],
       acknowledgedChunks: new Set(),
       lastAcknowledgedByte: 0,
+      speedHistory: [],
     };
 
     (session as any).downloadPath = downloadPath;
@@ -725,6 +755,75 @@ export class TransferService extends EventEmitter {
 
   getSession(sessionId: string): TransferSession | null {
     return this.sessions.get(sessionId) || null;
+  }
+
+  handleNetworkChange(newIp?: string): void {
+    const activeSessions = this.sessions.values();
+
+    for (const session of activeSessions) {
+      if (session.status === 'transferring' || session.status === 'reconnecting') {
+        log.info(`Network changed, session ${session.id} will attempt to resume`);
+        session.status = 'reconnecting';
+        this.emitSessionUpdate(session);
+
+        setTimeout(() => {
+          this.attemptReconnect(session);
+        }, 1000);
+      }
+    }
+  }
+
+  private async attemptReconnect(session: TransferSession): Promise<void> {
+    if (session.status !== 'reconnecting') return;
+
+    try {
+      log.info(`Attempting to reconnect session ${session.id}`);
+
+      const device: Device = {
+        id: session.deviceId,
+        name: session.deviceName,
+        ip: session.deviceId,
+        port: 51235,
+        lastSeen: Date.now(),
+        isLocal: false,
+      };
+
+      const options: tls.ConnectionOptions = {
+        host: device.ip,
+        port: device.port,
+        rejectUnauthorized: false,
+      };
+
+      const socket = tls.connect(options, () => {
+        log.info(`Reconnected to ${device.ip}:${device.port} for session ${session.id}`);
+        session.status = 'transferring';
+        this.emitSessionUpdate(session);
+
+        this.sendMessage(socket, {
+          type: 'resume',
+          sessionId: session.id,
+          fileId: session.files[0]?.id,
+          lastAcknowledgedByte: session.lastAcknowledgedByte,
+          lastAcknowledgedChunk: Math.max(...Array.from(session.acknowledgedChunks), 0),
+        });
+      });
+
+      socket.on('error', (err) => {
+        log.warn(`Reconnect attempt failed for session ${session.id}:`, err.message);
+        if (session.status === 'reconnecting') {
+          setTimeout(() => {
+            this.attemptReconnect(session);
+          }, 3000);
+        }
+      });
+    } catch (err) {
+      log.error(`Failed to initiate reconnect for session ${session.id}:`, err);
+      if (session.status === 'reconnecting') {
+        setTimeout(() => {
+          this.attemptReconnect(session);
+        }, 3000);
+      }
+    }
   }
 
   async stop(): Promise<void> {

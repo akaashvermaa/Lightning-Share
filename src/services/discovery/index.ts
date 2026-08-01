@@ -252,4 +252,11 @@ export class DiscoveryService extends EventEmitter {
   getDevices(): Device[] {
     return Array.from(this.devices.values());
   }
+
+  updateLocalIp(ip: string): void {
+    if (ip && ip !== this.localIp) {
+      log.info(`Local IP changed: ${this.localIp} -> ${ip}`);
+      this.localIp = ip;
+    }
+  }
 }

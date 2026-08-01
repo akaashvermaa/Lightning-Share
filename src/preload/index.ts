@@ -75,6 +75,11 @@ const api = {
     ipcRenderer.on('download-path-changed', handler);
     return () => ipcRenderer.removeListener('download-path-changed', handler);
   },
+  onNetworkChange: (callback: (info: { type: string; interface: string; address?: string; oldAddress?: string }) => void) => {
+    const handler = (_: Electron.IpcRendererEvent, info: any) => callback(info);
+    ipcRenderer.on('network-change', handler);
+    return () => ipcRenderer.removeListener('network-change', handler);
+  },
 };
 
 contextBridge.exposeInMainWorld('lightningshare', api);
