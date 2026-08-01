@@ -50,11 +50,19 @@ export class TransferService extends EventEmitter {
   private pendingTransfers: Map<string, PendingTransfer> = new Map();
   private writeStreams: Map<string, fs.WriteStream> = new Map();
   private fileHandles: Map<string, number> = new Map();
+  private localDeviceId: string = '';
+  private localDeviceName: string = '';
 
   constructor(fileService: FileService) {
     super();
     this.fileService = fileService;
     this.startServer();
+  }
+
+  setLocalDevice(deviceId: string, deviceName: string): void {
+    this.localDeviceId = deviceId;
+    this.localDeviceName = deviceName;
+    log.info(`TransferService: local device set to ${deviceName} (${deviceId})`);
   }
 
   private async startServer(): Promise<void> {
@@ -633,8 +641,8 @@ export class TransferService extends EventEmitter {
         this.sendMessage(socket, {
           type: 'request',
           sessionId,
-          deviceId: device.id,
-          deviceName: device.name,
+          deviceId: this.localDeviceId || sessionId,
+          deviceName: this.localDeviceName || 'Unknown Device',
           files,
           totalSize,
         });

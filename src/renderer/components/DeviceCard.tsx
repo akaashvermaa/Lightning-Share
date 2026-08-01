@@ -3,9 +3,10 @@ import { Device } from '../../shared/types';
 interface DeviceCardProps {
   device: Device;
   onSend: () => void;
+  disabled?: boolean;
 }
 
-export default function DeviceCard({ device, onSend }: DeviceCardProps) {
+export default function DeviceCard({ device, onSend, disabled }: DeviceCardProps) {
   return (
     <div className="bg-white rounded-lg border border-slate-200 p-4 hover:border-primary-300 hover:shadow-md transition-all">
       <div className="flex items-center gap-4">
@@ -27,10 +28,16 @@ export default function DeviceCard({ device, onSend }: DeviceCardProps) {
       </div>
       <div className="mt-4 flex gap-2">
         <button
-          onClick={onSend}
-          className="flex-1 px-4 py-2 bg-primary-600 text-white text-sm font-medium rounded-lg hover:bg-primary-700 transition-colors"
+          onClick={disabled ? undefined : onSend}
+          disabled={disabled}
+          title={disabled ? 'Run LightningShare on this device first to send files' : `Send files to ${device.name}`}
+          className={`flex-1 px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
+            disabled
+              ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
+              : 'bg-primary-600 text-white hover:bg-primary-700 cursor-pointer'
+          }`}
         >
-          Send Files
+          {disabled ? 'Run server to send' : 'Send Files'}
         </button>
       </div>
     </div>

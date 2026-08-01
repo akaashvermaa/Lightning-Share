@@ -14,6 +14,14 @@ export default function HomePage() {
   const [serverInfo, setServerInfo] = useState<any>(null);
   const [copied, setCopied] = useState(false);
 
+  // Detect if the user is accessing this server from a different device's browser.
+  // In that case they can't send/receive files because they have no local transfer server.
+  const isRemoteBrowser = serverInfo
+    ? !serverInfo.allAddresses?.some((addr: string) => addr === window.location.hostname) &&
+      window.location.hostname !== 'localhost' &&
+      window.location.hostname !== '127.0.0.1'
+    : false;
+
   useEffect(() => {
     window.lightningshare.getServerInfo().then(setServerInfo).catch(() => {});
     const interval = setInterval(() => {
@@ -126,6 +134,27 @@ export default function HomePage() {
         </div>
       )}
 
+      {/* Remote browser warning: this device doesn't have a server running */}
+      {isRemoteBrowser && (
+        <div className="bg-amber-50 border-b border-amber-200 px-8 py-3">
+          <div className="flex items-start gap-3">
+            <svg className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+              <line x1="12" y1="9" x2="12" y2="13" />
+              <line x1="12" y1="17" x2="12.01" y2="17" />
+            </svg>
+            <div>
+              <p className="text-sm font-semibold text-amber-800">You're viewing another device's server</p>
+              <p className="text-xs text-amber-700 mt-0.5">
+                To send or receive files <span className="font-semibold">from this device</span>, you must also run LightningShare on it.
+                Download and run <code className="px-1 py-0.5 bg-amber-100 rounded font-mono">start.bat</code> on this machine, then open{' '}
+                <code className="px-1 py-0.5 bg-amber-100 rounded font-mono">http://localhost:{serverInfo?.port || 51236}</code> in this browser.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="flex-1 overflow-auto p-8">
         {devices.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-center">
@@ -157,6 +186,7 @@ export default function HomePage() {
                 key={device.id}
                 device={device}
                 onSend={() => handleSendFiles(device.id)}
+                disabled={isRemoteBrowser}
               />
             ))}
           </div>

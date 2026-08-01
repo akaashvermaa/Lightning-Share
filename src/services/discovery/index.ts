@@ -10,6 +10,7 @@ import {
   DISCOVERY_PORT,
   DISCOVERY_INTERVAL,
   DISCOVERY_TIMEOUT,
+  TRANSFER_PORT,
 } from '../../shared/constants';
 
 const DATA_DIR = path.join(os.homedir(), '.lightningshare');
@@ -127,7 +128,7 @@ export class DiscoveryService extends EventEmitter {
       type: 'announce',
       deviceId: this.deviceId,
       deviceName: this.deviceName,
-      port: 51235,
+      port: TRANSFER_PORT,
     };
 
     const buffer = Buffer.from(JSON.stringify(message));

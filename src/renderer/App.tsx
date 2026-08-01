@@ -46,8 +46,15 @@ export default function App() {
       useTransferStore.getState().setIncomingTransfer(transfer);
     });
 
+    // Initial load
     window.lightningshare.getTransferSessions().then(setSessions);
     window.lightningshare.getDevices().then(setDevices);
+
+    // Periodic refresh: keeps device list in sync even when WS events are missed
+    // (e.g. if the other device started after this page loaded, or after a WS reconnect).
+    const devicePollInterval = setInterval(() => {
+      window.lightningshare.getDevices().then(setDevices).catch(() => {});
+    }, 5000);
 
     return () => {
       unsubDeviceDiscovered();
@@ -56,8 +63,10 @@ export default function App() {
       unsubSessionCompleted();
       unsubSessionError();
       unsubIncomingTransfer();
+      clearInterval(devicePollInterval);
     };
   }, []);
+
 
   return (
     <HashRouter>

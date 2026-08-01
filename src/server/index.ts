@@ -55,6 +55,14 @@ async function initializeServices(): Promise<void> {
   });
 
   await discoveryService.start();
+
+  // Wire local device identity into the transfer service so outgoing requests
+  // correctly identify the sender (not the target device).
+  transferService.setLocalDevice(
+    discoveryService.getDeviceId(),
+    settings.deviceName,
+  );
+
   log.info('Services initialized');
 }
 
@@ -160,6 +168,7 @@ function createApp(): express.Express {
     if (name) {
       settings.deviceName = name;
       discoveryService.setDeviceName(name);
+      transferService.setLocalDevice(discoveryService.getDeviceId(), name);
     }
     res.json({ success: true });
   });
