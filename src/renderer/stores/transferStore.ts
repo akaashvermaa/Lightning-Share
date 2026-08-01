@@ -13,7 +13,7 @@ interface TransferState {
   clearIncomingTransfer: (sessionId: string) => void;
 
   startTransfer: (deviceId: string, files: FileInfo[]) => Promise<string | null>;
-  acceptTransfer: (sessionId: string) => Promise<void>;
+  acceptTransfer: (sessionId: string, downloadPath?: string) => Promise<void>;
   rejectTransfer: (sessionId: string) => Promise<void>;
   cancelTransfer: (sessionId: string) => Promise<void>;
   pauseTransfer: (sessionId: string) => Promise<void>;
@@ -76,8 +76,8 @@ export const useTransferStore = create<TransferState>((set, get) => ({
     return null;
   },
 
-  acceptTransfer: async (sessionId) => {
-    await window.lightningshare.acceptTransfer(sessionId);
+  acceptTransfer: async (sessionId, downloadPath) => {
+    await window.lightningshare.acceptTransfer(sessionId, downloadPath);
     const incoming = get().incomingTransfers.find(t => t.sessionId === sessionId);
     if (incoming) {
       get().addSession({

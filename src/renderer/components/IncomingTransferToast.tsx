@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { IncomingTransfer } from '../../shared/types';
 import { useTransferStore } from '../stores/transferStore';
 
@@ -6,23 +6,88 @@ interface IncomingTransferToastProps {
   transfer: IncomingTransfer;
 }
 
-type ToastState = 'pending' | 'accepting' | 'accepted' | 'rejecting' | 'rejected';
+type ToastState = 'pending' | 'picking' | 'accepting' | 'accepted' | 'rejecting' | 'rejected';
+
+interface DirEntry {
+  name: string;
+  path: string;
+}
+interface BrowseResult {
+  current: string;
+  parent: string | null;
+  dirs: DirEntry[];
+}
+interface QuickDir {
+  label: string;
+  path: string;
+}
 
 export default function IncomingTransferToast({ transfer }: IncomingTransferToastProps) {
   const [state, setState] = useState<ToastState>('pending');
-  const [expanded] = useState(true);
   const { acceptTransfer, rejectTransfer, clearIncomingTransfer } = useTransferStore();
+
+  // Save location picker state
+  const [currentPath, setCurrentPath] = useState('');
+  const [browseResult, setBrowseResult] = useState<BrowseResult | null>(null);
+  const [quickDirs, setQuickDirs] = useState<QuickDir[]>([]);
+  const [customPath, setCustomPath] = useState('');
+  const [browseLoading, setBrowseLoading] = useState(false);
+  const [browseError, setBrowseError] = useState('');
 
   const totalSize = transfer.files.reduce((sum, f) => sum + f.size, 0);
 
-  const handleAccept = async () => {
+  // Initialize save location when entering 'picking' state
+  useEffect(() => {
+    if (state !== 'picking') return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const [quick, downloadPath] = await Promise.all([
+          window.lightningshare.getQuickDirs(),
+          window.lightningshare.getDownloadPath(),
+        ]);
+        if (cancelled) return;
+        setQuickDirs(quick);
+        setCurrentPath(downloadPath);
+        setCustomPath(downloadPath);
+        const browse = await window.lightningshare.browseDirs(downloadPath);
+        if (cancelled) return;
+        setBrowseResult(browse);
+      } catch {
+        setBrowseError('Failed to load directories');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [state]);
+
+  const browseTo = useCallback(async (dirPath: string) => {
+    setBrowseLoading(true);
+    setBrowseError('');
+    try {
+      const result = await window.lightningshare.browseDirs(dirPath);
+      setBrowseResult(result);
+      setCurrentPath(dirPath);
+      setCustomPath(dirPath);
+    } catch {
+      setBrowseError('Cannot read this folder');
+    } finally {
+      setBrowseLoading(false);
+    }
+  }, []);
+
+  const handleAcceptClick = () => {
+    setState('picking');
+  };
+
+  const handleConfirmAccept = async () => {
     setState('accepting');
     try {
-      await acceptTransfer(transfer.sessionId);
+      await acceptTransfer(transfer.sessionId, customPath || currentPath);
       setState('accepted');
       setTimeout(() => clearIncomingTransfer(transfer.sessionId), 2000);
-    } catch (e) {
-      setState('pending');
+    } catch {
+      setState('picking');
     }
   };
 
@@ -32,24 +97,32 @@ export default function IncomingTransferToast({ transfer }: IncomingTransferToas
       await rejectTransfer(transfer.sessionId);
       setState('rejected');
       setTimeout(() => clearIncomingTransfer(transfer.sessionId), 2000);
-    } catch (e) {
+    } catch {
       setState('pending');
     }
+  };
+
+  const handleBack = () => {
+    setState('pending');
+    setBrowseResult(null);
+    setBrowseError('');
   };
 
   const isAccepted = state === 'accepted';
   const isRejected = state === 'rejected' || state === 'rejecting';
   const isProcessing = state === 'accepting' || state === 'rejecting';
+  const isPicking = state === 'picking';
 
   return (
-    <div className="fixed bottom-4 right-4 w-96 bg-white rounded-xl shadow-2xl border border-slate-200 overflow-hidden z-50 animate-slide-in">
+    <div className="fixed bottom-4 right-4 w-[420px] bg-white rounded-xl shadow-2xl border border-slate-200 overflow-hidden z-50 animate-slide-in">
       <div className={`h-1 ${
-        isAccepted ? 'bg-green-500' : isRejected ? 'bg-red-500' : 'bg-blue-500'
+        isAccepted ? 'bg-green-500' : isRejected ? 'bg-red-500' : isPicking ? 'bg-amber-400' : 'bg-blue-500'
       }`} />
       <div className="p-4">
+        {/* Header section */}
         <div className="flex items-start gap-4">
           <div className={`w-12 h-12 rounded-full flex items-center justify-center flex-shrink-0 ${
-            isAccepted ? 'bg-green-50' : isRejected ? 'bg-red-50' : 'bg-blue-50'
+            isAccepted ? 'bg-green-50' : isRejected ? 'bg-red-50' : isPicking ? 'bg-amber-50' : 'bg-blue-50'
           }`}>
             {isAccepted ? (
               <svg className="w-6 h-6 text-green-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -59,6 +132,10 @@ export default function IncomingTransferToast({ transfer }: IncomingTransferToas
               <svg className="w-6 h-6 text-red-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <line x1="18" y1="6" x2="6" y2="18" />
                 <line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            ) : isPicking ? (
+              <svg className="w-6 h-6 text-amber-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
               </svg>
             ) : (
               <svg className="w-6 h-6 text-blue-500 animate-pulse" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -70,32 +147,52 @@ export default function IncomingTransferToast({ transfer }: IncomingTransferToas
           </div>
           <div className="flex-1 min-w-0">
             <h4 className="font-medium text-slate-900">
-              {isAccepted ? 'Transfer Accepted' : isRejected ? 'Transfer Declined' : `${transfer.deviceName} wants to send`}
+              {isAccepted
+                ? 'Transfer Accepted'
+                : isRejected
+                ? 'Transfer Declined'
+                : isPicking
+                ? 'Choose Save Location'
+                : `${transfer.deviceName} wants to send`}
             </h4>
             <p className="text-sm text-slate-500 mt-1">
               {transfer.files.length} file{transfer.files.length > 1 ? 's' : ''}
               {' · '}
               {formatBytes(totalSize)}
             </p>
-
-            {isAccepted && (
-              <p className="text-sm text-green-600 mt-2 flex items-center gap-1.5">
-                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <polyline points="20 6 9 17 4 12" />
-                </svg>
-                Receiving... Check the Transfers page for progress.
-              </p>
-            )}
-            {isRejected && (
-              <p className="text-sm text-red-500 mt-2">
-                Transfer declined.
-              </p>
-            )}
           </div>
+          {isPicking && (
+            <button
+              onClick={handleBack}
+              className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors flex-shrink-0"
+              title="Back"
+            >
+              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <line x1="19" y1="12" x2="5" y2="12" />
+                <polyline points="12 19 5 12 12 5" />
+              </svg>
+            </button>
+          )}
         </div>
 
-        {expanded && state === 'pending' && (
-          <div className="mt-3 max-h-32 overflow-auto border border-slate-100 rounded-lg">
+        {/* Accepted state */}
+        {isAccepted && (
+          <p className="text-sm text-green-600 mt-3 flex items-center gap-1.5">
+            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <polyline points="20 6 9 17 4 12" />
+            </svg>
+            Receiving to: <span className="font-mono text-xs">{customPath || currentPath}</span>
+          </p>
+        )}
+
+        {/* Rejected state */}
+        {isRejected && (
+          <p className="text-sm text-red-500 mt-3">Transfer declined.</p>
+        )}
+
+        {/* File list (pending + picking states) */}
+        {(state === 'pending' || isPicking) && (
+          <div className={`mt-3 ${isPicking ? 'max-h-24' : 'max-h-32'} overflow-auto border border-slate-100 rounded-lg`}>
             {transfer.files.map((file, index) => (
               <div key={index} className="flex items-center gap-2 px-3 py-1.5 border-b border-slate-50 last:border-b-0">
                 <span className="text-sm">
@@ -108,6 +205,94 @@ export default function IncomingTransferToast({ transfer }: IncomingTransferToas
           </div>
         )}
 
+        {/* Save location picker (picking state) */}
+        {isPicking && (
+          <div className="mt-3 space-y-2">
+            {/* Quick directories */}
+            {quickDirs.length > 0 && (
+              <div className="flex gap-1.5 flex-wrap">
+                {quickDirs.map((qd) => (
+                  <button
+                    key={qd.path}
+                    onClick={() => browseTo(qd.path)}
+                    className={`px-2.5 py-1 text-xs rounded-full transition-colors ${
+                      currentPath === qd.path
+                        ? 'bg-blue-100 text-blue-700 border border-blue-300'
+                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200 border border-transparent'
+                    }`}
+                  >
+                    {qd.label}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Current path breadcrumb */}
+            {browseResult && (
+              <div className="flex items-center gap-1 text-xs text-slate-500 bg-slate-50 rounded-lg px-2 py-1.5 overflow-x-auto whitespace-nowrap">
+                {browseResult.parent && (
+                  <button
+                    onClick={() => browseTo(browseResult.parent!)}
+                    className="text-slate-400 hover:text-slate-600 flex-shrink-0"
+                    title="Go up"
+                  >
+                    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <polyline points="15 18 9 12 15 6" />
+                    </svg>
+                  </button>
+                )}
+                <span className="font-mono truncate">{browseResult.current}</span>
+              </div>
+            )}
+
+            {/* Subdirectories list */}
+            {browseLoading ? (
+              <div className="flex items-center justify-center py-3">
+                <svg className="w-4 h-4 animate-spin text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                </svg>
+              </div>
+            ) : browseResult && browseResult.dirs.length > 0 ? (
+              <div className="max-h-32 overflow-auto border border-slate-100 rounded-lg">
+                {browseResult.dirs.map((dir) => (
+                  <button
+                    key={dir.path}
+                    onClick={() => browseTo(dir.path)}
+                    className="w-full flex items-center gap-2 px-3 py-1.5 border-b border-slate-50 last:border-b-0 hover:bg-blue-50 transition-colors text-left"
+                  >
+                    <svg className="w-4 h-4 text-amber-400 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                    </svg>
+                    <span className="text-sm text-slate-700 truncate flex-1">{dir.name}</span>
+                    <svg className="w-3.5 h-3.5 text-slate-300 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <polyline points="9 18 15 12 9 6" />
+                    </svg>
+                  </button>
+                ))}
+              </div>
+            ) : browseResult && browseResult.dirs.length === 0 ? (
+              <p className="text-xs text-slate-400 text-center py-2">No subfolders here</p>
+            ) : null}
+
+            {browseError && (
+              <p className="text-xs text-red-400">{browseError}</p>
+            )}
+
+            {/* Custom path input */}
+            <div>
+              <label className="text-xs text-slate-500 mb-1 block">Or type a custom path:</label>
+              <input
+                type="text"
+                value={customPath}
+                onChange={(e) => setCustomPath(e.target.value)}
+                placeholder="C:\Users\...\Downloads"
+                className="w-full text-sm px-3 py-1.5 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent font-mono"
+              />
+            </div>
+          </div>
+        )}
+
+        {/* Action buttons */}
         {state === 'pending' && (
           <div className="mt-4 flex gap-2">
             <button
@@ -118,19 +303,42 @@ export default function IncomingTransferToast({ transfer }: IncomingTransferToas
               Decline
             </button>
             <button
-              onClick={handleAccept}
+              onClick={handleAcceptClick}
               disabled={isProcessing}
               className="flex-1 px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
             >
-              {isProcessing && state === 'accepting' ? (
+              Accept
+            </button>
+          </div>
+        )}
+
+        {(isPicking || state === 'accepting') && (
+          <div className="mt-4 flex gap-2">
+            <button
+              onClick={handleBack}
+              className="flex-1 px-4 py-2 border border-slate-300 text-slate-700 text-sm font-medium rounded-lg hover:bg-slate-50 transition-colors"
+            >
+              Back
+            </button>
+            <button
+              onClick={handleConfirmAccept}
+              disabled={isProcessing || !customPath.trim()}
+              className="flex-1 px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
+            >
+              {state === 'accepting' ? (
                 <>
                   <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <path d="M21 12a9 9 0 1 1-6.219-8.56" />
                   </svg>
-                  Accepting...
+                  Starting...
                 </>
               ) : (
-                'Accept'
+                <>
+                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <polyline points="20 6 9 17 4 12" />
+                  </svg>
+                  Start Receiving
+                </>
               )}
             </button>
           </div>

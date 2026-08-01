@@ -197,8 +197,8 @@ export const lightningshareAPI = {
     return apiPost('/transfer/start', { deviceId, files });
   },
 
-  acceptTransfer: (sessionId: string) =>
-    apiPost('/transfer/accept', { sessionId }).then(() => ({ success: true })),
+  acceptTransfer: (sessionId: string, downloadPath?: string) =>
+    apiPost('/transfer/accept', { sessionId, downloadPath }).then(() => ({ success: true })),
   rejectTransfer: (sessionId: string) =>
     apiPost('/transfer/reject', { sessionId }).then(() => ({ success: true })),
   cancelTransfer: (sessionId: string) =>
@@ -226,6 +226,12 @@ export const lightningshareAPI = {
     apiPost('/open-file', { filePath }).then(() => ''),
   showFileInFolder: (filePath: string) =>
     apiPost('/show-in-folder', { filePath }).then(() => true),
+  browseDirs: (dirPath?: string) =>
+    apiGet<{ current: string; parent: string | null; dirs: { name: string; path: string }[] }>(
+      `/browse-dirs${dirPath ? `?path=${encodeURIComponent(dirPath)}` : ''}`
+    ),
+  getQuickDirs: () =>
+    apiGet<{ label: string; path: string }[]>('/quick-dirs'),
 
   onDeviceDiscovered: (callback: (device: Device) => void) =>
     subscribeEvent('device-discovered', callback),

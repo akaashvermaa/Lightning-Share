@@ -210,6 +210,44 @@ function createApp(): express.Express {
     res.json({ path: settings.downloadPath });
   });
 
+  // --- Browse directories (for save location picker) ---
+  app.get('/api/browse-dirs', (req, res) => {
+    const dirPath = (req.query.path as string) || os.homedir();
+    try {
+      const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+      const dirs = entries
+        .filter((e) => e.isDirectory())
+        .filter((e) => !e.name.startsWith('.') && !e.name.startsWith('$'))
+        .map((e) => ({
+          name: e.name,
+          path: path.join(dirPath, e.name),
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+      res.json({
+        current: dirPath,
+        parent: path.dirname(dirPath) !== dirPath ? path.dirname(dirPath) : null,
+        dirs,
+      });
+    } catch (err) {
+      res.status(400).json({ error: 'Cannot read directory' });
+    }
+  });
+
+  app.get('/api/quick-dirs', (_req, res) => {
+    const home = os.homedir();
+    const candidates = [
+      { label: 'Desktop', path: path.join(home, 'Desktop') },
+      { label: 'Downloads', path: path.join(home, 'Downloads') },
+      { label: 'Documents', path: path.join(home, 'Documents') },
+      { label: 'Home', path: home },
+    ];
+    const valid = candidates.filter((c) => {
+      try { return fs.existsSync(c.path) && fs.statSync(c.path).isDirectory(); }
+      catch { return false; }
+    });
+    res.json(valid);
+  });
+
   // --- File upload ---
   app.post('/api/upload', async (req, res) => {
     const fileName = req.headers['x-file-name'] as string;
@@ -270,10 +308,14 @@ function createApp(): express.Express {
   });
 
   app.post('/api/transfer/accept', async (req, res) => {
-    const { sessionId } = req.body;
-    const downloadPath = settings.downloadPath || path.join(os.homedir(), 'Downloads');
+    const { sessionId, downloadPath: customPath } = req.body;
+    const downloadPath = customPath || settings.downloadPath || path.join(os.homedir(), 'Downloads');
+    if (!fs.existsSync(downloadPath)) {
+      try { fs.mkdirSync(downloadPath, { recursive: true }); } catch {}
+    }
+    settings.downloadPath = downloadPath;
     await transferService.acceptSession(sessionId, downloadPath);
-    res.json({ success: true });
+    res.json({ success: true, downloadPath });
   });
 
   app.post('/api/transfer/reject', async (req, res) => {
