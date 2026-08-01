@@ -42,6 +42,17 @@ function parseMessage(data: Buffer): any {
   });
 }
 
+function errorDetails(error: unknown): string {
+  if (error instanceof Error) {
+    return error.stack || error.message;
+  }
+  return String(error);
+}
+
+function socketAddress(socket: tls.TLSSocket | net.Socket): string {
+  return `${socket.remoteAddress || 'unknown'}:${socket.remotePort || 'unknown'}`;
+}
+
 export class TransferService extends EventEmitter {
   private sessions: Map<string, TransferSession> = new Map();
   private server: tls.Server | null = null;
@@ -71,7 +82,10 @@ export class TransferService extends EventEmitter {
   }
 
   private async startServer(): Promise<void> {
+    log.info('[TRACE] ENTER startServer');
+    log.info('[TRACE] CERTIFICATE LOAD START');
     const certInfo = await certificateManager.getCertificate();
+    log.info(`[TRACE] CERTIFICATE LOAD SUCCESS cert=${certInfo.certPath}`);
 
     const options = {
       key: fs.readFileSync(certInfo.keyPath),
@@ -81,6 +95,7 @@ export class TransferService extends EventEmitter {
     };
 
     this.server = tls.createServer(options, (socket) => {
+      log.info(`[TRACE] TLS SERVER CALLBACK ${socketAddress(socket)}`);
       this.handleConnection(socket);
     });
 
@@ -90,14 +105,17 @@ export class TransferService extends EventEmitter {
 
     this.server.on('tlsClientError', (err, socket) => {
       log.error(
-        `TLS handshake failed from ${socket.remoteAddress || 'unknown'}:${socket.remotePort || 'unknown'}:`,
-        err,
+        `[TRACE] TLS HANDSHAKE ERROR from ${socketAddress(socket)}:\n${errorDetails(err)}`,
       );
+    });
+
+    this.server.on('secureConnection', (socket) => {
+      log.info(`[TRACE] TLS CLIENT CONNECTED ${socketAddress(socket)}`);
     });
 
     await new Promise<void>((resolve, reject) => {
       const onListening = () => {
-        log.info(`TLS transfer server listening on 0.0.0.0:${TRANSFER_PORT}`);
+        log.info(`[TRACE] EXIT startServer listening on 0.0.0.0:${TRANSFER_PORT}`);
         resolve();
       };
       const onError = (err: Error) => {
@@ -112,8 +130,9 @@ export class TransferService extends EventEmitter {
   }
 
   private handleConnection(socket: tls.TLSSocket | net.Socket): void {
-    const remoteAddress = `${socket.remoteAddress}:${socket.remotePort}`;
-    log.info(`New transfer connection from ${remoteAddress}`);
+    const remoteAddress = socketAddress(socket);
+    log.info(`[TRACE] ENTER handleConnection ${remoteAddress}`);
+    log.info(`[TRACE] INCOMING TLS CONNECTION ${remoteAddress}`);
 
     let buffer = Buffer.alloc(0);
 
@@ -129,23 +148,29 @@ export class TransferService extends EventEmitter {
 
         try {
           const message = parseMessage(messageData);
+          log.info(`[TRACE] RECEIVER MESSAGE ${message.type} START session=${message.sessionId || 'unknown'}`);
           await this.handleMessage(socket, message);
+          log.info(`[TRACE] RECEIVER MESSAGE ${message.type} SUCCESS session=${message.sessionId || 'unknown'}`);
         } catch (err) {
-          log.error('Failed to parse transfer message:', err);
+          log.error(`[TRACE] RECEIVER MESSAGE ERROR ${remoteAddress}:\n${errorDetails(err)}`);
+          socket.destroy(err instanceof Error ? err : new Error(String(err)));
         }
       }
     });
 
-    socket.on('close', () => {
-      log.info(`Connection closed: ${remoteAddress}`);
+    socket.on('close', (hadError) => {
+      log.info(`[TRACE] RECEIVER SOCKET CLOSE ${remoteAddress} hadError=${hadError}`);
     });
 
     socket.on('error', (err) => {
-      log.error(`Socket error from ${remoteAddress}:`, err);
+      log.error(`[TRACE] RECEIVER SOCKET ERROR ${remoteAddress}:\n${errorDetails(err)}`);
     });
+
+    log.info(`[TRACE] EXIT handleConnection ${remoteAddress}`);
   }
 
   private async handleMessage(socket: tls.TLSSocket | net.Socket, message: any): Promise<void> {
+    log.info(`[TRACE] ENTER handleMessage type=${message.type} session=${message.sessionId || 'unknown'}`);
     switch (message.type) {
       case 'request':
         await this.handleTransferRequest(socket, message);
@@ -172,11 +197,13 @@ export class TransferService extends EventEmitter {
         await this.handleError(socket, message);
         break;
     }
+    log.info(`[TRACE] EXIT handleMessage type=${message.type} session=${message.sessionId || 'unknown'}`);
   }
 
   private async handleTransferRequest(socket: net.Socket, message: any): Promise<void> {
     const { sessionId, deviceId, deviceName, files, totalSize } = message;
 
+    log.info(`[TRACE] ENTER handleTransferRequest session=${sessionId}`);
     log.info(`[RECV_REQUEST] Transfer request from ${deviceName}: sessionId=${sessionId}, ${files.length} files, ${totalSize} bytes, socketDestroyed=${socket.destroyed}`);
 
     const incomingTransfer: IncomingTransfer = {
@@ -190,9 +217,11 @@ export class TransferService extends EventEmitter {
     this.pendingTransfers.set(sessionId, { transfer: incomingTransfer, socket });
     log.info(`[RECV_REQUEST] Stored pending transfer. Map now has: ${Array.from(this.pendingTransfers.keys()).join(', ')}`);
     this.emit('incoming-transfer', incomingTransfer);
+    log.info(`[TRACE] EXIT handleTransferRequest session=${sessionId} incoming-transfer-emitted`);
   }
 
   private async handleAccept(socket: net.Socket, message: any): Promise<void> {
+    log.info(`[TRACE] ENTER handleAccept session=${message.sessionId}`);
     log.info(`[RECV_ACCEPT] Received 'accept' from ${socket.remoteAddress} for session ${message.sessionId}`);
     const session = this.sessions.get(message.sessionId);
     if (!session) {
@@ -204,6 +233,7 @@ export class TransferService extends EventEmitter {
     session.status = 'transferring';
     this.emitSessionUpdate(session);
     await this.startSendingChunks(session, socket);
+    log.info(`[TRACE] EXIT handleAccept session=${message.sessionId}`);
   }
 
   private async handleReject(socket: net.Socket, message: any): Promise<void> {
@@ -588,17 +618,24 @@ export class TransferService extends EventEmitter {
   private sendMessage(socket: tls.TLSSocket | net.Socket, message: any): void {
     const remoteAddr = (socket as any).remoteAddress || 'unknown';
     if (socket.destroyed || socket.writable === false) {
-      log.warn(`[SEND_MSG] Socket closed/unwritable (${remoteAddr}), message type=${message.type} NOT sent`);
+      log.warn(`[TRACE] SEND ${message.type} SKIPPED socket=${remoteAddr} destroyed=${socket.destroyed} writable=${socket.writable}`);
       return;
     }
     try {
+      log.info(`[TRACE] SEND ${message.type} START session=${message.sessionId || 'unknown'} socket=${remoteAddr}`);
       const data = Buffer.from(JSON.stringify(message));
       const lengthBuffer = Buffer.alloc(4);
       lengthBuffer.writeUInt32BE(data.length);
-      socket.write(Buffer.concat([lengthBuffer, data]));
-      log.info(`[SEND_MSG] Sent '${message.type}' message to ${remoteAddr} (${data.length} bytes)`);
+      const frame = Buffer.concat([lengthBuffer, data]);
+      socket.write(frame, (err) => {
+        if (err) {
+          log.error(`[TRACE] SEND ${message.type} ERROR socket=${remoteAddr}:\n${errorDetails(err)}`);
+          return;
+        }
+        log.info(`[TRACE] SEND ${message.type} SUCCESS session=${message.sessionId || 'unknown'} socket=${remoteAddr} bytes=${data.length}`);
+      });
     } catch (err) {
-      log.error(`[SEND_MSG] Failed to send '${message.type}' to ${remoteAddr}:`, err);
+      log.error(`[TRACE] SEND ${message.type} ERROR socket=${remoteAddr}:\n${errorDetails(err)}`);
     }
   }
 
@@ -654,7 +691,10 @@ export class TransferService extends EventEmitter {
         ? device.port
         : TRANSFER_PORT;
 
-      log.info(`Connecting to transfer endpoint ${device.ip}:${port}`);
+      log.info(`[TRACE] ENTER createSession session=${sessionId} target=${device.name}`);
+      log.info(`[TRACE] DEVICE RESOLVED id=${device.id} ip=${device.ip}`);
+      log.info(`[TRACE] PORT RESOLVED port=${port}`);
+      log.info(`[TRACE] OPEN SOCKET START ${device.ip}:${port}`);
 
       const options: tls.ConnectionOptions = {
         host: device.ip,
@@ -662,12 +702,19 @@ export class TransferService extends EventEmitter {
         rejectUnauthorized: false,
       };
 
-      const socket = tls.connect(options, () => {
+      const socket = tls.connect(options);
+
+      socket.on('connect', () => {
+        log.info(`[TRACE] TCP CONNECTED ${device.ip}:${port}`);
+      });
+
+      socket.on('secureConnect', () => {
         socket.setTimeout(0);
-        log.info(`TLS connected to ${device.ip}:${port} for transfer`);
+        log.info(`[TRACE] TLS CONNECTED ${device.ip}:${port}`);
         session.status = 'connecting';
         this.emitSessionUpdate(session);
 
+        log.info(`[TRACE] HELLO/METADATA START session=${sessionId}`);
         this.sendMessage(socket, {
           type: 'request',
           sessionId,
@@ -676,9 +723,11 @@ export class TransferService extends EventEmitter {
           files,
           totalSize,
         });
+        log.info(`[TRACE] HELLO/METADATA QUEUED session=${sessionId}`);
       });
 
       socket.setTimeout(10000, () => {
+        log.error(`[TRACE] CONNECT TIMEOUT ${device.ip}:${port}`);
         const timeoutError = new Error(`Timed out connecting to ${device.ip}:${port}`);
         socket.destroy(timeoutError);
       });
@@ -695,7 +744,8 @@ export class TransferService extends EventEmitter {
             const message = parseMessage(messageData);
             await this.handleMessage(socket, message);
           } catch (err) {
-            log.error('Failed to parse transfer message on outgoing socket:', err);
+            log.error(`[TRACE] SENDER MESSAGE ERROR session=${sessionId}:\n${errorDetails(err)}`);
+            socket.destroy(err instanceof Error ? err : new Error(String(err)));
           }
         }
       });
@@ -703,38 +753,49 @@ export class TransferService extends EventEmitter {
       socket.on('error', (err) => {
         const code = (err as NodeJS.ErrnoException).code;
         log.error(
-          `TLS connection error to ${device.ip}:${port}${code ? ` (${code})` : ''}:`,
-          err,
+          `[TRACE] SOCKET ERROR ${device.ip}:${port}${code ? ` (${code})` : ''}:\n${errorDetails(err)}`,
         );
         session.status = 'failed';
         session.error = err.message;
         this.emit('session-error', session.id, err.message);
       });
 
-      socket.on('close', () => {
-        log.info(`Outgoing TLS connection closed for session ${sessionId}`);
+      socket.on('close', (hadError) => {
+        log.info(`[TRACE] SOCKET CLOSE session=${sessionId} hadError=${hadError}`);
       });
+
+      log.info(`[TRACE] EXIT createSession session=${sessionId} socket-opening`);
     }
 
+    if (direction !== 'sending') {
+      log.info(`[TRACE] EXIT createSession session=${sessionId} direction=${direction}`);
+    }
     return session;
   }
 
   async startSession(sessionId: string): Promise<void> {
+    log.info(`[TRACE] ENTER startSession session=${sessionId}`);
     const session = this.sessions.get(sessionId);
-    if (!session) return;
+    if (!session) {
+      log.warn(`[TRACE] EXIT startSession session=${sessionId} not-found`);
+      return;
+    }
 
     // Don't override 'connecting' status if TLS callback already set it
     if (session.status === 'pending') {
       session.status = 'connecting';
       this.emitSessionUpdate(session);
     }
+    log.info(`[TRACE] EXIT startSession session=${sessionId} status=${session.status}`);
   }
 
   async acceptSession(sessionId: string, downloadPath: string): Promise<void> {
+    log.info(`[TRACE] ENTER acceptSession session=${sessionId}`);
     log.info(`[ACCEPT_SESSION] Called: sessionId=${sessionId}, downloadPath=${downloadPath}`);
     const pending = this.pendingTransfers.get(sessionId);
     if (!pending) {
       log.warn(`[ACCEPT_SESSION] No pending transfer found for session ${sessionId}`);
+      log.warn(`[TRACE] EXIT acceptSession session=${sessionId} pending-not-found`);
       log.info(`[ACCEPT_SESSION] Pending transfers map keys: ${Array.from(this.pendingTransfers.keys()).join(', ') || '(empty)'}`);
       return;
     }
@@ -775,6 +836,7 @@ export class TransferService extends EventEmitter {
     });
 
     log.info(`[ACCEPT_SESSION] Sent 'accept' message to sender. Session ${sessionId} ready to receive.`);
+    log.info(`[TRACE] EXIT acceptSession session=${sessionId} accept-queued`);
   }
 
   async rejectSession(sessionId: string): Promise<void> {
