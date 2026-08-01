@@ -99,7 +99,6 @@ export const useTransferStore = create<TransferState>((set, get) => ({
         speedHistory: [],
       });
     }
-    get().clearIncomingTransfer(sessionId);
   },
 
   rejectTransfer: async (sessionId) => {

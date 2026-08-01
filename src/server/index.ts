@@ -309,19 +309,35 @@ function createApp(): express.Express {
 
   app.post('/api/transfer/accept', async (req, res) => {
     const { sessionId, downloadPath: customPath } = req.body;
-    const downloadPath = customPath || settings.downloadPath || path.join(os.homedir(), 'Downloads');
-    if (!fs.existsSync(downloadPath)) {
-      try { fs.mkdirSync(downloadPath, { recursive: true }); } catch {}
+    if (!sessionId) {
+      return res.status(400).json({ success: false, error: 'Missing sessionId' });
     }
-    settings.downloadPath = downloadPath;
-    await transferService.acceptSession(sessionId, downloadPath);
-    res.json({ success: true, downloadPath });
+    try {
+      const downloadPath = customPath || settings.downloadPath || path.join(os.homedir(), 'Downloads');
+      if (!fs.existsSync(downloadPath)) {
+        try { fs.mkdirSync(downloadPath, { recursive: true }); } catch {}
+      }
+      settings.downloadPath = downloadPath;
+      await transferService.acceptSession(sessionId, downloadPath);
+      res.json({ success: true, downloadPath });
+    } catch (err) {
+      log.error('Accept transfer error:', err);
+      res.status(500).json({ success: false, error: (err as Error).message });
+    }
   });
 
   app.post('/api/transfer/reject', async (req, res) => {
     const { sessionId } = req.body;
-    await transferService.rejectSession(sessionId);
-    res.json({ success: true });
+    if (!sessionId) {
+      return res.status(400).json({ success: false, error: 'Missing sessionId' });
+    }
+    try {
+      await transferService.rejectSession(sessionId);
+      res.json({ success: true });
+    } catch (err) {
+      log.error('Reject transfer error:', err);
+      res.status(500).json({ success: false, error: (err as Error).message });
+    }
   });
 
   app.post('/api/transfer/cancel', async (req, res) => {

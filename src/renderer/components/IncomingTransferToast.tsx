@@ -6,7 +6,7 @@ interface IncomingTransferToastProps {
   transfer: IncomingTransfer;
 }
 
-type ToastState = 'pending' | 'picking' | 'accepting' | 'accepted' | 'rejecting' | 'rejected';
+type ToastState = 'pending' | 'picking' | 'accepting' | 'accepted' | 'rejecting' | 'rejected' | 'error';
 
 interface DirEntry {
   name: string;
@@ -86,8 +86,10 @@ export default function IncomingTransferToast({ transfer }: IncomingTransferToas
       await acceptTransfer(transfer.sessionId, customPath || currentPath);
       setState('accepted');
       setTimeout(() => clearIncomingTransfer(transfer.sessionId), 2000);
-    } catch {
-      setState('picking');
+    } catch (e) {
+      console.error('Accept failed:', e);
+      setState('error');
+      setTimeout(() => setState('picking'), 3000);
     }
   };
 
@@ -97,8 +99,10 @@ export default function IncomingTransferToast({ transfer }: IncomingTransferToas
       await rejectTransfer(transfer.sessionId);
       setState('rejected');
       setTimeout(() => clearIncomingTransfer(transfer.sessionId), 2000);
-    } catch {
-      setState('pending');
+    } catch (e) {
+      console.error('Reject failed:', e);
+      setState('rejected');
+      setTimeout(() => clearIncomingTransfer(transfer.sessionId), 2000);
     }
   };
 
@@ -112,17 +116,18 @@ export default function IncomingTransferToast({ transfer }: IncomingTransferToas
   const isRejected = state === 'rejected' || state === 'rejecting';
   const isProcessing = state === 'accepting' || state === 'rejecting';
   const isPicking = state === 'picking';
+  const isError = state === 'error';
 
   return (
     <div className="fixed bottom-4 right-4 w-[420px] bg-white rounded-xl shadow-2xl border border-slate-200 overflow-hidden z-50 animate-slide-in">
       <div className={`h-1 ${
-        isAccepted ? 'bg-green-500' : isRejected ? 'bg-red-500' : isPicking ? 'bg-amber-400' : 'bg-blue-500'
+        isAccepted ? 'bg-green-500' : isRejected ? 'bg-red-500' : isPicking ? 'bg-amber-400' : isError ? 'bg-red-400' : 'bg-blue-500'
       }`} />
       <div className="p-4">
         {/* Header section */}
         <div className="flex items-start gap-4">
           <div className={`w-12 h-12 rounded-full flex items-center justify-center flex-shrink-0 ${
-            isAccepted ? 'bg-green-50' : isRejected ? 'bg-red-50' : isPicking ? 'bg-amber-50' : 'bg-blue-50'
+            isAccepted ? 'bg-green-50' : isRejected ? 'bg-red-50' : isPicking ? 'bg-amber-50' : isError ? 'bg-red-50' : 'bg-blue-50'
           }`}>
             {isAccepted ? (
               <svg className="w-6 h-6 text-green-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -136,6 +141,12 @@ export default function IncomingTransferToast({ transfer }: IncomingTransferToas
             ) : isPicking ? (
               <svg className="w-6 h-6 text-amber-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+              </svg>
+            ) : isError ? (
+              <svg className="w-6 h-6 text-red-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="12" cy="12" r="10" />
+                <line x1="12" y1="8" x2="12" y2="12" />
+                <line x1="12" y1="16" x2="12.01" y2="16" />
               </svg>
             ) : (
               <svg className="w-6 h-6 text-blue-500 animate-pulse" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -153,6 +164,8 @@ export default function IncomingTransferToast({ transfer }: IncomingTransferToas
                 ? 'Transfer Declined'
                 : isPicking
                 ? 'Choose Save Location'
+                : isError
+                ? 'Connection Error'
                 : `${transfer.deviceName} wants to send`}
             </h4>
             <p className="text-sm text-slate-500 mt-1">
@@ -188,6 +201,20 @@ export default function IncomingTransferToast({ transfer }: IncomingTransferToas
         {/* Rejected state */}
         {isRejected && (
           <p className="text-sm text-red-500 mt-3">Transfer declined.</p>
+        )}
+
+        {/* Error state */}
+        {isError && (
+          <div className="mt-3">
+            <p className="text-sm text-red-500 flex items-center gap-1.5">
+              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="12" cy="12" r="10" />
+                <line x1="12" y1="8" x2="12" y2="12" />
+                <line x1="12" y1="16" x2="12.01" y2="16" />
+              </svg>
+              Could not connect. The sender may have gone offline. Retrying...
+            </p>
+          </div>
         )}
 
         {/* File list (pending + picking states) */}

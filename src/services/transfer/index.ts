@@ -541,10 +541,18 @@ export class TransferService extends EventEmitter {
   }
 
   private sendMessage(socket: tls.TLSSocket | net.Socket, message: any): void {
-    const data = Buffer.from(JSON.stringify(message));
-    const lengthBuffer = Buffer.alloc(4);
-    lengthBuffer.writeUInt32BE(data.length);
-    socket.write(Buffer.concat([lengthBuffer, data]));
+    if (socket.destroyed || socket.writable === false) {
+      log.warn(`Attempted to send message on closed socket (${(socket as any).remoteAddress})`);
+      return;
+    }
+    try {
+      const data = Buffer.from(JSON.stringify(message));
+      const lengthBuffer = Buffer.alloc(4);
+      lengthBuffer.writeUInt32BE(data.length);
+      socket.write(Buffer.concat([lengthBuffer, data]));
+    } catch (err) {
+      log.error('Failed to send message on socket:', err);
+    }
   }
 
   private updateProgress(session: TransferSession): void {
@@ -652,8 +660,11 @@ export class TransferService extends EventEmitter {
     const session = this.sessions.get(sessionId);
     if (!session) return;
 
-    session.status = 'transferring';
-    this.emitSessionUpdate(session);
+    // Don't override 'connecting' status if TLS callback already set it
+    if (session.status === 'pending') {
+      session.status = 'connecting';
+      this.emitSessionUpdate(session);
+    }
   }
 
   async acceptSession(sessionId: string, downloadPath: string): Promise<void> {
@@ -710,7 +721,7 @@ export class TransferService extends EventEmitter {
       this.pendingTransfers.delete(sessionId);
       log.info(`Rejected incoming transfer ${sessionId}, sent reject to sender`);
     } else {
-      log.warn(`No pending transfer to reject for session ${sessionId}`);
+      log.warn(`No pending transfer to reject for session ${sessionId} (already processed)`);
     }
   }
 
