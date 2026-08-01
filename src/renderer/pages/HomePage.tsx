@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { useAppStore } from '../stores/appStore';
 import { useTransferStore } from '../stores/transferStore';
 import DeviceCard from '../components/DeviceCard';
@@ -11,6 +11,16 @@ export default function HomePage() {
   const { sessions, incomingTransfers } = useTransferStore();
   const [selectedDevice, setSelectedDevice] = useState<string | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [serverInfo, setServerInfo] = useState<any>(null);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    window.lightningshare.getServerInfo().then(setServerInfo).catch(() => {});
+    const interval = setInterval(() => {
+      window.lightningshare.getServerInfo().then(setServerInfo).catch(() => {});
+    }, 5000);
+    return () => clearInterval(interval);
+  }, []);
 
   const handleSendFiles = useCallback((deviceId: string) => {
     setSelectedDevice(deviceId);
@@ -21,6 +31,15 @@ export default function HomePage() {
     setIsModalOpen(false);
     setSelectedDevice(null);
   }, []);
+
+  const handleCopyUrl = useCallback(() => {
+    if (serverInfo?.url) {
+      navigator.clipboard.writeText(serverInfo.url).then(() => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      });
+    }
+  }, [serverInfo]);
 
   const activeTransfers = sessions.filter(
     s => s.status === 'transferring' || s.status === 'paused' || s.status === 'reconnecting' || s.status === 'connecting' || s.status === 'pending'
@@ -37,17 +56,75 @@ export default function HomePage() {
           <div>
             <h2 className="text-2xl font-semibold text-slate-900">Nearby Devices</h2>
             <p className="text-sm text-slate-500 mt-1">
-              Your IP: <span className="font-mono text-slate-600">{localIp}</span>
+              Your IP: <span className="font-mono text-slate-600">{localIp || serverInfo?.localIp}</span>
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
+            {serverInfo && (
+              <button
+                onClick={handleCopyUrl}
+                className="flex items-center gap-2 px-3 py-1.5 bg-blue-50 text-blue-600 rounded-full text-sm hover:bg-blue-100 transition-colors"
+                title="Click to copy server URL"
+              >
+                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+                  <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+                </svg>
+                {copied ? 'Copied!' : serverInfo.url}
+              </button>
+            )}
             <span className="flex items-center gap-2 px-3 py-1.5 bg-green-50 text-green-600 rounded-full text-sm">
               <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
-              Online
+              {serverInfo?.running ? 'Server Live' : 'Online'}
             </span>
           </div>
         </div>
       </header>
+
+      {serverInfo && (
+        <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border-b border-blue-100 px-8 py-3">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 bg-blue-500 rounded-lg flex items-center justify-center flex-shrink-0">
+                <svg className="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M5 12.55a11 11 0 0 1 14.08 0" />
+                  <path d="M1.42 9a16 16 0 0 1 21.16 0" />
+                  <path d="M8.53 16.11a6 6 0 0 1 6.95 0" />
+                  <line x1="12" y1="20" x2="12.01" y2="20" />
+                </svg>
+              </div>
+              <div>
+                <p className="text-sm font-medium text-slate-800">
+                  LightningShare server is running
+                </p>
+                <p className="text-xs text-slate-500">
+                  Other devices can find you at <span className="font-mono font-medium text-blue-600">{serverInfo.url}</span>
+                  {serverInfo.allAddresses?.length > 1 && (
+                    <span> or </span>
+                  )}
+                  {serverInfo.allAddresses?.slice(1).map((addr: string, i: number) => (
+                    <span key={i} className="font-mono font-medium text-blue-600">
+                      {i > 0 ? ', ' : ''}http://{addr}:{serverInfo.port}
+                    </span>
+                  ))}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleCopyUrl}
+                className="px-3 py-1.5 text-xs font-medium text-blue-600 bg-white border border-blue-200 rounded-lg hover:bg-blue-50 transition-colors flex items-center gap-1.5"
+              >
+                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                </svg>
+                {copied ? 'Copied!' : 'Copy URL'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="flex-1 overflow-auto p-8">
         {devices.length === 0 ? (
@@ -64,6 +141,14 @@ export default function HomePage() {
             <p className="text-slate-500 max-w-sm">
               Make sure other devices are connected to the same Wi-Fi network and running LightningShare.
             </p>
+            <div className="mt-6 p-4 bg-blue-50 rounded-lg max-w-md text-left">
+              <p className="text-sm font-medium text-blue-900 mb-2">How to connect another device:</p>
+              <ol className="text-sm text-blue-700 space-y-1 list-decimal list-inside">
+                <li>Install LightningShare on the other device</li>
+                <li>Run <code className="px-1.5 py-0.5 bg-blue-100 rounded font-mono text-xs">npm run launch</code> or double-click <code className="px-1.5 py-0.5 bg-blue-100 rounded font-mono text-xs">start.bat</code></li>
+                <li>Or open this URL in the other device's browser: <span className="font-mono text-xs break-all">{serverInfo?.url}</span></li>
+              </ol>
+            </div>
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">

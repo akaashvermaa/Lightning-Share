@@ -121,6 +121,31 @@ function createApp(): express.Express {
     next();
   });
 
+  // --- Server info (health check + connection info) ---
+  app.get('/api/server-info', (_req, res) => {
+    const interfaces = os.networkInterfaces();
+    const addresses: string[] = [];
+    for (const name of Object.keys(interfaces)) {
+      const netInterface = interfaces[name];
+      if (!netInterface) continue;
+      for (const info of netInterface) {
+        if (info.family === 'IPv4' && !info.internal) {
+          addresses.push(info.address);
+        }
+      }
+    }
+    res.json({
+      running: true,
+      port: PORT,
+      deviceName: settings.deviceName,
+      deviceId: discoveryService?.getDeviceId() || '',
+      localIp: addresses[0] || '127.0.0.1',
+      allAddresses: addresses,
+      url: `http://${addresses[0] || 'localhost'}:${PORT}`,
+      timestamp: Date.now(),
+    });
+  });
+
   // --- Device info ---
   app.get('/api/device-id', (_req, res) => {
     res.json({ id: discoveryService.getDeviceId() });
@@ -327,7 +352,7 @@ function createApp(): express.Express {
 
   // --- Static file serving (production) ---
   if (!IS_DEV) {
-    const rendererDir = path.resolve(__dirname, '../renderer');
+    const rendererDir = path.resolve(__dirname, '../../renderer');
     app.use(express.static(rendererDir));
     app.get('*', (req, res, next) => {
       if (req.path.startsWith('/api')) return next();

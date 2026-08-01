@@ -1,0 +1,8 @@
+[32m[2026-08-01T12:12:35.764Z] [INFO][0m LightningShare starting...
+[32m[2026-08-01T12:12:35.802Z] [INFO][0m Network monitor started
+[32m[2026-08-01T12:12:35.824Z] [INFO][0m Discovery starting on 192.168.1.10
+[32m[2026-08-01T12:12:35.842Z] [INFO][0m Discovery listener bound to port 51234
+[32m[2026-08-01T12:12:35.875Z] [INFO][0m Discovery service started
+[32m[2026-08-01T12:12:35.893Z] [INFO][0m Services initialized
+[32m[2026-08-01T12:12:35.919Z] [INFO][0m Server listening on http://localhost:51236
+[32m[2026-08-01T12:12:35.938Z] [INFO][0m TLS transfer server listening on port 51235

@@ -163,6 +163,7 @@ function serializeSessionForClient(session: any): TransferSession {
 }
 
 export const lightningshareAPI = {
+  getServerInfo: () => apiGet<any>('/server-info'),
   getDeviceId: () => apiGet<{ id: string }>('/device-id').then((r) => r.id),
   getDeviceName: () => apiGet<{ name: string }>('/device-name').then((r) => r.name),
   setDeviceName: (name: string) => apiPost('/device-name', { name }).then(() => true),

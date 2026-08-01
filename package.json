@@ -13,6 +13,7 @@
     "build:vite": "vite build",
     "build:server": "tsc -p tsconfig.server.json",
     "start": "node dist/server/server/index.js",
+    "launch": "node launch.js",
     "lint": "eslint src --ext .ts,.tsx",
     "typecheck": "tsc --noEmit"
   },
