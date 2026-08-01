@@ -76,31 +76,44 @@ export default function IncomingTransferToast({ transfer }: IncomingTransferToas
     }
   }, []);
 
+  const [errorMsg, setErrorMsg] = useState('');
+
   const handleAcceptClick = () => {
     setState('picking');
   };
 
   const handleConfirmAccept = async () => {
     setState('accepting');
+    setErrorMsg('');
+    const savePath = customPath || currentPath;
+    console.log('[TOAST] handleConfirmAccept START', { sessionId: transfer.sessionId, savePath });
     try {
-      await acceptTransfer(transfer.sessionId, customPath || currentPath);
+      await acceptTransfer(transfer.sessionId, savePath);
+      console.log('[TOAST] acceptTransfer resolved OK');
       setState('accepted');
       setTimeout(() => clearIncomingTransfer(transfer.sessionId), 2000);
-    } catch (e) {
-      console.error('Accept failed:', e);
+    } catch (e: any) {
+      const msg = e?.message || String(e);
+      console.error('[TOAST] Accept FAILED:', msg, e);
+      setErrorMsg(msg);
       setState('error');
-      setTimeout(() => setState('picking'), 3000);
+      setTimeout(() => setState('picking'), 5000);
     }
   };
 
   const handleReject = async () => {
     setState('rejecting');
+    setErrorMsg('');
+    console.log('[TOAST] handleReject START', { sessionId: transfer.sessionId });
     try {
       await rejectTransfer(transfer.sessionId);
+      console.log('[TOAST] rejectTransfer resolved OK');
       setState('rejected');
       setTimeout(() => clearIncomingTransfer(transfer.sessionId), 2000);
-    } catch (e) {
-      console.error('Reject failed:', e);
+    } catch (e: any) {
+      const msg = e?.message || String(e);
+      console.error('[TOAST] Reject FAILED:', msg, e);
+      setErrorMsg(msg);
       setState('rejected');
       setTimeout(() => clearIncomingTransfer(transfer.sessionId), 2000);
     }
@@ -207,12 +220,12 @@ export default function IncomingTransferToast({ transfer }: IncomingTransferToas
         {isError && (
           <div className="mt-3">
             <p className="text-sm text-red-500 flex items-center gap-1.5">
-              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <circle cx="12" cy="12" r="10" />
                 <line x1="12" y1="8" x2="12" y2="12" />
                 <line x1="12" y1="16" x2="12.01" y2="16" />
               </svg>
-              Could not connect. The sender may have gone offline. Retrying...
+              Accept failed: {errorMsg || 'Unknown error'}
             </p>
           </div>
         )}

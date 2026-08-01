@@ -77,7 +77,14 @@ export const useTransferStore = create<TransferState>((set, get) => ({
   },
 
   acceptTransfer: async (sessionId, downloadPath) => {
-    await window.lightningshare.acceptTransfer(sessionId, downloadPath);
+    console.log('[STORE] acceptTransfer START', { sessionId, downloadPath });
+    try {
+      const result = await window.lightningshare.acceptTransfer(sessionId, downloadPath);
+      console.log('[STORE] acceptTransfer API result:', result);
+    } catch (e: any) {
+      console.error('[STORE] acceptTransfer API FAILED:', e?.message || e);
+      throw e;
+    }
     const incoming = get().incomingTransfers.find(t => t.sessionId === sessionId);
     if (incoming) {
       get().addSession({
@@ -102,7 +109,14 @@ export const useTransferStore = create<TransferState>((set, get) => ({
   },
 
   rejectTransfer: async (sessionId) => {
-    await window.lightningshare.rejectTransfer(sessionId);
+    console.log('[STORE] rejectTransfer START', { sessionId });
+    try {
+      await window.lightningshare.rejectTransfer(sessionId);
+      console.log('[STORE] rejectTransfer API OK');
+    } catch (e: any) {
+      console.error('[STORE] rejectTransfer API FAILED:', e?.message || e);
+      throw e;
+    }
     get().clearIncomingTransfer(sessionId);
   },
 

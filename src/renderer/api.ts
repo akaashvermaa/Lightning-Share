@@ -197,10 +197,50 @@ export const lightningshareAPI = {
     return apiPost('/transfer/start', { deviceId, files });
   },
 
-  acceptTransfer: (sessionId: string, downloadPath?: string) =>
-    apiPost('/transfer/accept', { sessionId, downloadPath }).then(() => ({ success: true })),
-  rejectTransfer: (sessionId: string) =>
-    apiPost('/transfer/reject', { sessionId }).then(() => ({ success: true })),
+  acceptTransfer: async (sessionId: string, downloadPath?: string) => {
+    console.log('[API] acceptTransfer POST', { sessionId, downloadPath });
+    try {
+      const res = await fetch(`${API_BASE}/api/transfer/accept`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId, downloadPath }),
+      });
+      console.log('[API] acceptTransfer response status:', res.status);
+      if (!res.ok) {
+        const text = await res.text();
+        console.error('[API] acceptTransfer HTTP error:', res.status, text);
+        throw new Error(`HTTP ${res.status}: ${text}`);
+      }
+      const json = await res.json();
+      console.log('[API] acceptTransfer response body:', json);
+      return { success: true, ...json };
+    } catch (e: any) {
+      console.error('[API] acceptTransfer FETCH FAILED:', e?.message || e);
+      throw e;
+    }
+  },
+  rejectTransfer: async (sessionId: string) => {
+    console.log('[API] rejectTransfer POST', { sessionId });
+    try {
+      const res = await fetch(`${API_BASE}/api/transfer/reject`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId }),
+      });
+      console.log('[API] rejectTransfer response status:', res.status);
+      if (!res.ok) {
+        const text = await res.text();
+        console.error('[API] rejectTransfer HTTP error:', res.status, text);
+        throw new Error(`HTTP ${res.status}: ${text}`);
+      }
+      const json = await res.json();
+      console.log('[API] rejectTransfer response body:', json);
+      return { success: true, ...json };
+    } catch (e: any) {
+      console.error('[API] rejectTransfer FETCH FAILED:', e?.message || e);
+      throw e;
+    }
+  },
   cancelTransfer: (sessionId: string) =>
     apiPost('/transfer/cancel', { sessionId }).then(() => ({ success: true })),
   pauseTransfer: (sessionId: string) =>

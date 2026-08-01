@@ -146,6 +146,8 @@ export class TransferService extends EventEmitter {
   private async handleTransferRequest(socket: net.Socket, message: any): Promise<void> {
     const { sessionId, deviceId, deviceName, files, totalSize } = message;
 
+    log.info(`[RECV_REQUEST] Transfer request from ${deviceName}: sessionId=${sessionId}, ${files.length} files, ${totalSize} bytes, socketDestroyed=${socket.destroyed}`);
+
     const incomingTransfer: IncomingTransfer = {
       sessionId,
       deviceId,
@@ -155,13 +157,19 @@ export class TransferService extends EventEmitter {
     };
 
     this.pendingTransfers.set(sessionId, { transfer: incomingTransfer, socket });
+    log.info(`[RECV_REQUEST] Stored pending transfer. Map now has: ${Array.from(this.pendingTransfers.keys()).join(', ')}`);
     this.emit('incoming-transfer', incomingTransfer);
   }
 
   private async handleAccept(socket: net.Socket, message: any): Promise<void> {
+    log.info(`[RECV_ACCEPT] Received 'accept' from ${socket.remoteAddress} for session ${message.sessionId}`);
     const session = this.sessions.get(message.sessionId);
-    if (!session) return;
+    if (!session) {
+      log.warn(`[RECV_ACCEPT] No session found for ${message.sessionId}`);
+      return;
+    }
 
+    log.info(`[RECV_ACCEPT] Session status was '${session.status}', changing to 'transferring'`);
     session.status = 'transferring';
     this.emitSessionUpdate(session);
     await this.startSendingChunks(session, socket);
@@ -178,9 +186,13 @@ export class TransferService extends EventEmitter {
 
   private async handleChunk(socket: net.Socket, message: any): Promise<void> {
     const session = this.sessions.get(message.sessionId);
-    if (!session) return;
+    if (!session) {
+      log.warn(`[RECV_CHUNK] No session found for ${message.sessionId}`);
+      return;
+    }
 
     const { fileId, chunkIndex, offset, data, checksum } = message;
+    log.info(`[RECV_CHUNK] chunk ${chunkIndex} for file ${fileId}, offset=${offset}, dataLen=${data?.length || data?.data?.length || 0}`);
 
     const chunkBuffer: Buffer = Buffer.isBuffer(data) ? data : Buffer.from(data.data || data);
 
@@ -237,6 +249,8 @@ export class TransferService extends EventEmitter {
   private async handleAck(socket: net.Socket, message: any): Promise<void> {
     const session = this.sessions.get(message.sessionId);
     if (!session) return;
+
+    log.info(`[RECV_ACK] chunk ${message.chunkIndex} valid=${message.valid} for session ${message.sessionId}`);
 
     const connectionKey = `${socket.remoteAddress}:${socket.remotePort}`;
     const connection = this.connections.get(connectionKey);
@@ -541,8 +555,9 @@ export class TransferService extends EventEmitter {
   }
 
   private sendMessage(socket: tls.TLSSocket | net.Socket, message: any): void {
+    const remoteAddr = (socket as any).remoteAddress || 'unknown';
     if (socket.destroyed || socket.writable === false) {
-      log.warn(`Attempted to send message on closed socket (${(socket as any).remoteAddress})`);
+      log.warn(`[SEND_MSG] Socket closed/unwritable (${remoteAddr}), message type=${message.type} NOT sent`);
       return;
     }
     try {
@@ -550,8 +565,9 @@ export class TransferService extends EventEmitter {
       const lengthBuffer = Buffer.alloc(4);
       lengthBuffer.writeUInt32BE(data.length);
       socket.write(Buffer.concat([lengthBuffer, data]));
+      log.info(`[SEND_MSG] Sent '${message.type}' message to ${remoteAddr} (${data.length} bytes)`);
     } catch (err) {
-      log.error('Failed to send message on socket:', err);
+      log.error(`[SEND_MSG] Failed to send '${message.type}' to ${remoteAddr}:`, err);
     }
   }
 
@@ -668,14 +684,17 @@ export class TransferService extends EventEmitter {
   }
 
   async acceptSession(sessionId: string, downloadPath: string): Promise<void> {
+    log.info(`[ACCEPT_SESSION] Called: sessionId=${sessionId}, downloadPath=${downloadPath}`);
     const pending = this.pendingTransfers.get(sessionId);
     if (!pending) {
-      log.warn(`No pending transfer found for session ${sessionId}`);
+      log.warn(`[ACCEPT_SESSION] No pending transfer found for session ${sessionId}`);
+      log.info(`[ACCEPT_SESSION] Pending transfers map keys: ${Array.from(this.pendingTransfers.keys()).join(', ') || '(empty)'}`);
       return;
     }
 
     const incoming = pending.transfer;
     const socket = pending.socket;
+    log.info(`[ACCEPT_SESSION] Found pending transfer: device=${incoming.deviceName}, socketDestroyed=${socket.destroyed}, socketWritable=${socket.writable}`);
 
     const session: TransferSession = {
       id: sessionId,
@@ -708,20 +727,23 @@ export class TransferService extends EventEmitter {
       sessionId,
     });
 
-    log.info(`Accepted incoming transfer ${sessionId}, sent accept to sender`);
+    log.info(`[ACCEPT_SESSION] Sent 'accept' message to sender. Session ${sessionId} ready to receive.`);
   }
 
   async rejectSession(sessionId: string): Promise<void> {
+    log.info(`[REJECT_SESSION] Called: sessionId=${sessionId}`);
     const pending = this.pendingTransfers.get(sessionId);
     if (pending) {
+      log.info(`[REJECT_SESSION] Found pending transfer, sending reject...`);
       this.sendMessage(pending.socket, {
         type: 'reject',
         sessionId,
       });
       this.pendingTransfers.delete(sessionId);
-      log.info(`Rejected incoming transfer ${sessionId}, sent reject to sender`);
+      log.info(`[REJECT_SESSION] Sent 'reject' message to sender and cleaned up.`);
     } else {
-      log.warn(`No pending transfer to reject for session ${sessionId} (already processed)`);
+      log.warn(`[REJECT_SESSION] No pending transfer to reject for session ${sessionId} (already processed)`);
+      log.info(`[REJECT_SESSION] Pending transfers map keys: ${Array.from(this.pendingTransfers.keys()).join(', ') || '(empty)'}`);
     }
   }
 
