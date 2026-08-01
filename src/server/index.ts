@@ -486,6 +486,7 @@ async function main(): Promise<void> {
 
   await initializeServices();
   setupServiceEventBridge();
+  transferService.recoverPersistedSessions();
 
   const app = createApp();
   const server = http.createServer(app);

@@ -43,6 +43,17 @@ export interface TransferSession {
   acknowledgedChunks: Set<number>;
   lastAcknowledgedByte: number;
   speedHistory: SpeedSample[];
+  metrics?: TransferMetrics;
+}
+
+export interface TransferMetrics {
+  currentSpeed: number;
+  averageSpeed: number;
+  rttMs: number;
+  windowSize: number;
+  inFlightChunks: number;
+  queuedBytes: number;
+  acknowledgedChunks: number;
 }
 
 export interface SpeedSample {
@@ -93,7 +104,7 @@ export interface DiscoveryMessage {
 }
 
 export interface TransferMessage {
-  type: 'request' | 'accept' | 'reject' | 'chunk' | 'ack' | 'complete' | 'error' | 'resume';
+  type: 'request' | 'accept' | 'reject' | 'manifest' | 'manifest-ack' | 'chunk' | 'ack' | 'complete' | 'error' | 'resume' | 'resume-ack';
   sessionId: string;
   payload?: unknown;
 }

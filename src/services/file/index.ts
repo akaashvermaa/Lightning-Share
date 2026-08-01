@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { createHash } from 'crypto';
+import { createHash } from 'blake3';
 import { v4 as uuidv4 } from 'uuid';
 import log from '../../shared/logger';
 import { FileInfo, ChunkInfo } from '../../shared/types';
@@ -121,7 +121,7 @@ export class FileService {
 
   async calculateFileChecksum(filePath: string): Promise<string> {
     return new Promise((resolve, reject) => {
-      const hash = createHash('sha256');
+      const hash = createHash();
       const stream = fs.createReadStream(filePath);
       stream.on('data', (data) => hash.update(data));
       stream.on('end', () => resolve(hash.digest('hex')));
@@ -130,7 +130,7 @@ export class FileService {
   }
 
   async calculateChunkChecksum(chunk: Buffer): Promise<string> {
-    const hash = createHash('sha256');
+    const hash = createHash();
     hash.update(chunk);
     return hash.digest('hex');
   }
@@ -158,10 +158,11 @@ export class FileService {
 
   createWriteStream(
     filePath: string,
-    options: { flags?: string } = {}
+    options: { flags?: string; start?: number } = {}
   ): fs.WriteStream {
     return fs.createWriteStream(filePath, {
       flags: options.flags || 'ax',
+      start: options.start,
       highWaterMark: 256 * 1024,
     });
   }

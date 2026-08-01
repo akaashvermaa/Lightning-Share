@@ -14,6 +14,7 @@
     "build:server": "tsc -p tsconfig.server.json",
     "start": "node dist/server/server/index.js",
     "launch": "node launch.js",
+    "benchmark": "node scripts/benchmark-peer.js",
     "lint": "eslint src --ext .ts,.tsx",
     "typecheck": "tsc --noEmit"
   },

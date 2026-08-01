@@ -260,6 +260,15 @@ function TransferCard({ session }: { session: any }) {
         </div>
       </div>
 
+      {session.metrics && isActive && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-3 text-xs">
+          <Metric label="Current" value={formatSpeed(session.metrics.currentSpeed)} />
+          <Metric label="RTT" value={`${Math.round(session.metrics.rttMs)} ms`} />
+          <Metric label="Window" value={`${session.metrics.windowSize} chunks`} />
+          <Metric label="Queued" value={formatBytes(session.metrics.queuedBytes)} />
+        </div>
+      )}
+
       {expanded && session.files.length > 1 && (
         <div className="mt-3 pt-3 border-t border-slate-100 space-y-2">
           {session.files.map((file: any, index: number) => {
@@ -300,6 +309,15 @@ function TransferCard({ session }: { session: any }) {
           })}
         </div>
       )}
+    </div>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: string }): JSX.Element {
+  return (
+    <div className="rounded-md bg-slate-50 px-2.5 py-2">
+      <p className="text-slate-400">{label}</p>
+      <p className="font-medium text-slate-600 truncate">{value}</p>
     </div>
   );
 }
