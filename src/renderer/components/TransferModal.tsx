@@ -1,0 +1,147 @@
+import { useState, useEffect } from 'react';
+import { FileInfo } from '../../shared/types';
+
+interface TransferModalProps {
+  deviceId: string;
+  onClose: () => void;
+}
+
+export default function TransferModal({ deviceId, onClose }: TransferModalProps) {
+  const [files, setFiles] = useState<FileInfo[]>([]);
+  const [isSending, setIsSending] = useState(false);
+
+  const handleSelectFiles = async () => {
+    const selected = await window.lightningshare.selectFiles();
+    if (selected.length > 0) {
+      setFiles(selected);
+    }
+  };
+
+  const handleSelectFolder = async () => {
+    const folder = await window.lightningshare.selectFolder();
+    if (folder) {
+      setFiles([folder]);
+    }
+  };
+
+  const handleSend = async () => {
+    if (files.length === 0) return;
+    setIsSending(true);
+    await window.lightningshare.startTransfer(deviceId, files);
+    setIsSending(false);
+    onClose();
+  };
+
+  const totalSize = files.reduce((sum, f) => sum + f.size, 0);
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg mx-4">
+        <div className="flex items-center justify-between p-6 border-b border-slate-200">
+          <h2 className="text-xl font-semibold text-slate-900">Send Files</h2>
+          <button
+            onClick={onClose}
+            className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
+          >
+            <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="p-6">
+          {files.length === 0 ? (
+            <div className="space-y-3">
+              <button
+                onClick={handleSelectFiles}
+                className="w-full px-4 py-3 border border-slate-300 rounded-lg text-slate-700 hover:bg-slate-50 transition-colors flex items-center justify-center gap-2"
+              >
+                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
+                  <polyline points="13 2 13 9 20 9" />
+                </svg>
+                Select Files
+              </button>
+              <button
+                onClick={handleSelectFolder}
+                className="w-full px-4 py-3 border border-slate-300 rounded-lg text-slate-700 hover:bg-slate-50 transition-colors flex items-center justify-center gap-2"
+              >
+                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                </svg>
+                Select Folder
+              </button>
+            </div>
+          ) : (
+            <div>
+              <div className="mb-4">
+                <span className="text-sm text-slate-500">
+                  {files.length} file{files.length > 1 ? 's' : ''} selected
+                </span>
+                <span className="text-sm text-slate-500 ml-2">
+                  ({formatBytes(totalSize)})
+                </span>
+              </div>
+              <div className="max-h-48 overflow-auto border border-slate-200 rounded-lg">
+                {files.map((file, index) => (
+                  <div
+                    key={file.id || index}
+                    className="flex items-center gap-3 p-3 border-b border-slate-100 last:border-b-0"
+                  >
+                    <div className="w-10 h-10 bg-slate-100 rounded-lg flex items-center justify-center">
+                      {file.isDirectory ? (
+                        <svg className="w-5 h-5 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                        </svg>
+                      ) : (
+                        <svg className="w-5 h-5 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
+                          <polyline points="13 2 13 9 20 9" />
+                        </svg>
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-slate-700 truncate">{file.name}</p>
+                      <p className="text-xs text-slate-500">{formatBytes(file.size)}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <button
+                onClick={() => setFiles([])}
+                className="mt-3 text-sm text-primary-600 hover:text-primary-700"
+              >
+                Clear selection
+              </button>
+            </div>
+          )}
+        </div>
+
+        <div className="flex gap-3 p-6 border-t border-slate-200">
+          <button
+            onClick={onClose}
+            className="flex-1 px-4 py-2 border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-50 transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleSend}
+            disabled={files.length === 0 || isSending}
+            className="flex-1 px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            {isSending ? 'Sending...' : 'Send'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
