@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { FileInfo } from '../../shared/types';
 import { UploadProgress } from '../api';
 
@@ -13,13 +13,16 @@ export default function TransferModal({ deviceId, onClose }: TransferModalProps)
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const lastUploadRender = useRef(0);
   const [sendStatus, setSendStatus] = useState<'idle' | 'uploading' | 'sent' | 'error'>('idle');
 
   const handleSelectFiles = async () => {
     setIsUploading(true);
     setUploadError(null);
     try {
-      const selected = await window.lightningshare.selectFiles(setUploadProgress);
+      const selected = await window.lightningshare.selectFiles((progress) => {
+        reportUploadProgress(progress);
+      });
       if (selected.length > 0) {
         setFiles(selected);
       }
@@ -35,7 +38,9 @@ export default function TransferModal({ deviceId, onClose }: TransferModalProps)
     setIsUploading(true);
     setUploadError(null);
     try {
-      const folderFiles = await window.lightningshare.selectFolder(setUploadProgress);
+      const folderFiles = await window.lightningshare.selectFolder((progress) => {
+        reportUploadProgress(progress);
+      });
       if (folderFiles && folderFiles.length > 0) {
         setFiles(folderFiles);
       }
@@ -44,6 +49,14 @@ export default function TransferModal({ deviceId, onClose }: TransferModalProps)
     } finally {
       setIsUploading(false);
       setUploadProgress(null);
+    }
+  };
+
+  const reportUploadProgress = (progress: UploadProgress) => {
+    const now = Date.now();
+    if (now - lastUploadRender.current >= 100 || progress.percentage >= 100) {
+      lastUploadRender.current = now;
+      setUploadProgress(progress);
     }
   };
 

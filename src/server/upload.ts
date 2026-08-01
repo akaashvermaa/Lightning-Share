@@ -28,7 +28,9 @@ export class UploadManager {
     readStream: NodeJS.ReadableStream
   ): Promise<string> {
     const tempPath = this.getTempPath(fileId, fileName);
-    const writeStream = fs.createWriteStream(tempPath);
+    const writeStream = fs.createWriteStream(tempPath, {
+      highWaterMark: 1024 * 1024,
+    });
 
     return new Promise((resolve, reject) => {
       readStream.pipe(writeStream);

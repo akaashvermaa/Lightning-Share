@@ -49,7 +49,7 @@ function uploadFile(baseUrl, filePath, fileSize) {
       method: 'POST',
       headers: {
         'Content-Length': fileSize,
-        'X-File-Name': path.basename(filePath),
+        'X-File-Name': encodeURIComponent(path.basename(filePath)),
         'X-File-Size': String(fileSize),
         'X-File-Id': crypto.randomUUID(),
         'X-Mime-Type': 'application/octet-stream',

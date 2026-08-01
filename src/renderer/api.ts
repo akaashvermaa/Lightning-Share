@@ -104,7 +104,7 @@ function uploadFile(
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `${API_BASE}/api/upload`);
-    xhr.setRequestHeader('X-File-Name', file.name);
+    xhr.setRequestHeader('X-File-Name', encodeURIComponent(file.name));
     xhr.setRequestHeader('X-File-Size', String(file.size));
     xhr.setRequestHeader('X-File-Id', crypto.randomUUID());
     xhr.setRequestHeader('X-Mime-Type', file.type || 'application/octet-stream');

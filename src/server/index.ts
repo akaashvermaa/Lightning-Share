@@ -261,7 +261,13 @@ function createApp(): express.Express {
 
   // --- File upload ---
   app.post('/api/upload', async (req, res) => {
-    const fileName = req.headers['x-file-name'] as string;
+    const encodedFileName = req.headers['x-file-name'] as string;
+    let fileName = encodedFileName;
+    try {
+      fileName = decodeURIComponent(encodedFileName || '');
+    } catch {
+      // Keep the raw header for compatibility with older clients.
+    }
     const fileSize = parseInt(req.headers['x-file-size'] as string, 10);
     const fileId = (req.headers['x-file-id'] as string) || uuidv4();
     const mimeType = (req.headers['x-mime-type'] as string) || 'application/octet-stream';
@@ -327,8 +333,16 @@ function createApp(): express.Express {
     }
     try {
       const downloadPath = customPath || settings.downloadPath || path.join(os.homedir(), 'Downloads');
-      if (!fs.existsSync(downloadPath)) {
-        try { fs.mkdirSync(downloadPath, { recursive: true }); } catch {}
+      try {
+        await fs.promises.mkdir(downloadPath, { recursive: true });
+        const pathStats = await fs.promises.stat(downloadPath);
+        if (!pathStats.isDirectory()) {
+          throw new Error('The selected save path is not a directory');
+        }
+      } catch (error) {
+        const message = `Cannot initialize save directory: ${(error as Error).message}`;
+        log.error(`[ACCEPT] ${message}`);
+        return res.status(400).json({ success: false, error: message });
       }
       settings.downloadPath = downloadPath;
       log.info(`[ACCEPT] Calling transferService.acceptSession...`);

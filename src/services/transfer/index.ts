@@ -391,18 +391,7 @@ export class TransferService extends EventEmitter {
     log.info(`[RECV_ACCEPT] Session status was '${session.status}', changing to 'transferring'`);
     session.status = 'transferring';
     this.emitSessionUpdate(session);
-
-    const files = await Promise.all(session.files.map(async (file) => ({
-      fileId: file.id,
-      name: file.name,
-      size: file.size,
-      checksum: await this.fileService.calculateFileChecksum(file.path),
-    })));
-    this.sendMessage(socket, {
-      type: 'manifest',
-      sessionId: session.id,
-      files,
-    });
+    await this.startSendingChunks(session, socket);
     log.info(`[TRACE] EXIT handleAccept session=${message.sessionId}`);
   }
 
