@@ -45,6 +45,7 @@ function parseMessage(data: Buffer): any {
 export class TransferService extends EventEmitter {
   private sessions: Map<string, TransferSession> = new Map();
   private server: tls.Server | null = null;
+  private serverReady: Promise<void>;
   private fileService: FileService;
   private connections: Map<string, ActiveConnection> = new Map();
   private pendingTransfers: Map<string, PendingTransfer> = new Map();
@@ -56,13 +57,17 @@ export class TransferService extends EventEmitter {
   constructor(fileService: FileService) {
     super();
     this.fileService = fileService;
-    this.startServer();
+    this.serverReady = this.startServer();
   }
 
   setLocalDevice(deviceId: string, deviceName: string): void {
     this.localDeviceId = deviceId;
     this.localDeviceName = deviceName;
     log.info(`TransferService: local device set to ${deviceName} (${deviceId})`);
+  }
+
+  async waitUntilReady(): Promise<void> {
+    await this.serverReady;
   }
 
   private async startServer(): Promise<void> {
@@ -79,12 +84,30 @@ export class TransferService extends EventEmitter {
       this.handleConnection(socket);
     });
 
-    this.server.listen(TRANSFER_PORT, '0.0.0.0', () => {
-      log.info(`TLS transfer server listening on port ${TRANSFER_PORT}`);
-    });
-
     this.server.on('error', (err) => {
       log.error('TLS server error:', err);
+    });
+
+    this.server.on('tlsClientError', (err, socket) => {
+      log.error(
+        `TLS handshake failed from ${socket.remoteAddress || 'unknown'}:${socket.remotePort || 'unknown'}:`,
+        err,
+      );
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      const onListening = () => {
+        log.info(`TLS transfer server listening on 0.0.0.0:${TRANSFER_PORT}`);
+        resolve();
+      };
+      const onError = (err: Error) => {
+        this.server?.off('listening', onListening);
+        reject(err);
+      };
+
+      this.server?.once('listening', onListening);
+      this.server?.once('error', onError);
+      this.server?.listen(TRANSFER_PORT, '0.0.0.0');
     });
   }
 
@@ -627,14 +650,21 @@ export class TransferService extends EventEmitter {
     log.info(`Created transfer session ${sessionId} with ${device.name}`);
 
     if (direction === 'sending') {
+      const port = Number.isInteger(device.port) && device.port > 0
+        ? device.port
+        : TRANSFER_PORT;
+
+      log.info(`Connecting to transfer endpoint ${device.ip}:${port}`);
+
       const options: tls.ConnectionOptions = {
         host: device.ip,
-        port: device.port,
+        port,
         rejectUnauthorized: false,
       };
 
       const socket = tls.connect(options, () => {
-        log.info(`TLS connected to ${device.ip}:${device.port} for transfer`);
+        socket.setTimeout(0);
+        log.info(`TLS connected to ${device.ip}:${port} for transfer`);
         session.status = 'connecting';
         this.emitSessionUpdate(session);
 
@@ -646,6 +676,11 @@ export class TransferService extends EventEmitter {
           files,
           totalSize,
         });
+      });
+
+      socket.setTimeout(10000, () => {
+        const timeoutError = new Error(`Timed out connecting to ${device.ip}:${port}`);
+        socket.destroy(timeoutError);
       });
 
       let buffer = Buffer.alloc(0);
@@ -666,7 +701,11 @@ export class TransferService extends EventEmitter {
       });
 
       socket.on('error', (err) => {
-        log.error(`TLS connection error to ${device.ip}:`, err);
+        const code = (err as NodeJS.ErrnoException).code;
+        log.error(
+          `TLS connection error to ${device.ip}:${port}${code ? ` (${code})` : ''}:`,
+          err,
+        );
         session.status = 'failed';
         session.error = err.message;
         this.emit('session-error', session.id, err.message);

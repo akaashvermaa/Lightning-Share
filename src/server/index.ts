@@ -37,6 +37,8 @@ async function initializeServices(): Promise<void> {
   transferService = new TransferService(fileService);
   discoveryService = new DiscoveryService();
 
+  await transferService.waitUntilReady();
+
   networkMonitor.start();
 
   networkMonitor.on('network-change', (event) => {
