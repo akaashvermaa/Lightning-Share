@@ -9,11 +9,7 @@ import {
   Device,
   FileInfo,
   TransferSession,
-  ChunkInfo,
   IncomingTransfer,
-  ChunkPayload,
-  AckPayload,
-  ResumePayload,
 } from '../../shared/types';
 import { FileService } from '../file';
 import { certificateManager } from './certificate';
@@ -32,14 +28,28 @@ interface ActiveConnection {
   retries: number;
 }
 
+interface PendingTransfer {
+  transfer: IncomingTransfer;
+  socket: tls.TLSSocket | net.Socket;
+}
+
+function parseMessage(data: Buffer): any {
+  return JSON.parse(data.toString(), (key, value) => {
+    if (value && typeof value === 'object' && value.type === 'Buffer' && Array.isArray(value.data)) {
+      return Buffer.from(value.data);
+    }
+    return value;
+  });
+}
+
 export class TransferService extends EventEmitter {
   private sessions: Map<string, TransferSession> = new Map();
   private server: tls.Server | null = null;
   private fileService: FileService;
   private connections: Map<string, ActiveConnection> = new Map();
-  private pendingTransfers: Map<string, IncomingTransfer> = new Map();
+  private pendingTransfers: Map<string, PendingTransfer> = new Map();
   private writeStreams: Map<string, fs.WriteStream> = new Map();
-  private serverSocket: net.Server | null = null;
+  private fileHandles: Map<string, number> = new Map();
 
   constructor(fileService: FileService) {
     super();
@@ -87,7 +97,7 @@ export class TransferService extends EventEmitter {
         buffer = buffer.slice(4 + messageLength);
 
         try {
-          const message = JSON.parse(messageData.toString());
+          const message = parseMessage(messageData);
           await this.handleMessage(socket, message);
         } catch (err) {
           log.error('Failed to parse transfer message:', err);
@@ -144,7 +154,7 @@ export class TransferService extends EventEmitter {
       totalSize,
     };
 
-    this.pendingTransfers.set(sessionId, incomingTransfer);
+    this.pendingTransfers.set(sessionId, { transfer: incomingTransfer, socket });
     this.emit('incoming-transfer', incomingTransfer);
   }
 
@@ -154,7 +164,7 @@ export class TransferService extends EventEmitter {
 
     session.status = 'transferring';
     this.emitSessionUpdate(session);
-    this.startSendingChunks(session, socket);
+    await this.startSendingChunks(session, socket);
   }
 
   private async handleReject(socket: net.Socket, message: any): Promise<void> {
@@ -166,13 +176,15 @@ export class TransferService extends EventEmitter {
     socket.end();
   }
 
-  private async handleChunk(socket: net.Socket, message: ChunkPayload): Promise<void> {
+  private async handleChunk(socket: net.Socket, message: any): Promise<void> {
     const session = this.sessions.get(message.sessionId);
     if (!session) return;
 
     const { fileId, chunkIndex, offset, data, checksum } = message;
 
-    const isValid = await this.fileService.verifyChunkChecksum(data, checksum);
+    const chunkBuffer: Buffer = Buffer.isBuffer(data) ? data : Buffer.from(data.data || data);
+
+    const isValid = await this.fileService.verifyChunkChecksum(chunkBuffer, checksum);
     if (!isValid) {
       log.warn(`Chunk ${chunkIndex} checksum mismatch for file ${fileId}`);
       this.sendMessage(socket, {
@@ -183,19 +195,30 @@ export class TransferService extends EventEmitter {
         acknowledgedByte: offset,
         checksum: '',
         valid: false,
-      } as AckPayload & { valid: boolean });
+      });
       return;
     }
 
     const fileInfo = session.files.find(f => f.id === fileId);
     if (!fileInfo) return;
 
-    const writeStream = this.getWriteStream(session.id, fileId);
-    if (writeStream) {
-      writeStream.write(data);
+    let writeStream = this.getWriteStream(session.id, fileId);
+    if (!writeStream) {
+      writeStream = await this.createWriteStream(session, fileId);
     }
 
-    session.lastAcknowledgedByte = offset + data.length;
+    if (writeStream) {
+      writeStream.write(chunkBuffer);
+    }
+
+    (session as any).fileProgress = (session as any).fileProgress || {};
+    (session as any).fileProgress[fileId] = (session as any).fileProgress[fileId] || {
+      transferred: 0,
+      completed: false,
+    };
+    (session as any).fileProgress[fileId].transferred += chunkBuffer.length;
+
+    session.lastAcknowledgedByte = offset + chunkBuffer.length;
     session.acknowledgedChunks.add(chunkIndex);
 
     this.sendMessage(socket, {
@@ -206,40 +229,43 @@ export class TransferService extends EventEmitter {
       acknowledgedByte: session.lastAcknowledgedByte,
       checksum,
       valid: true,
-    } as AckPayload & { valid: boolean });
+    });
 
     this.updateProgress(session);
   }
 
-  private async handleAck(socket: net.Socket, message: AckPayload & { valid?: boolean }): Promise<void> {
+  private async handleAck(socket: net.Socket, message: any): Promise<void> {
     const session = this.sessions.get(message.sessionId);
     if (!session) return;
 
     const connectionKey = `${socket.remoteAddress}:${socket.remotePort}`;
     const connection = this.connections.get(connectionKey);
-    if (!connection) return;
 
     if (!message.valid) {
       log.warn(`Chunk ${message.chunkIndex} failed verification, will retry`);
-      connection.retries++;
-      if (connection.retries < MAX_CHUNK_RETRIES) {
-        setTimeout(() => {
-          this.resendChunk(session, connection);
-        }, RETRY_DELAY);
-      } else {
-        session.status = 'failed';
-        session.error = `Chunk ${message.chunkIndex} failed after ${MAX_CHUNK_RETRIES} attempts`;
-        this.emit('session-error', session.id, session.error);
+      if (connection) {
+        connection.retries++;
+        if (connection.retries < MAX_CHUNK_RETRIES) {
+          setTimeout(() => {
+            this.resendChunk(session, connection);
+          }, RETRY_DELAY);
+        } else {
+          session.status = 'failed';
+          session.error = `Chunk ${message.chunkIndex} failed after ${MAX_CHUNK_RETRIES} attempts`;
+          this.emit('session-error', session.id, session.error);
+        }
       }
       return;
     }
 
-    connection.retries = 0;
+    if (connection) {
+      connection.retries = 0;
+    }
     session.acknowledgedChunks.add(message.chunkIndex);
     session.lastAcknowledgedByte = message.acknowledgedByte;
 
     this.updateProgress(session);
-    this.sendNextChunk(session, socket);
+    await this.sendNextChunk(session, socket);
   }
 
   private async handleComplete(socket: net.Socket, message: any): Promise<void> {
@@ -250,8 +276,24 @@ export class TransferService extends EventEmitter {
     const fileInfo = session.files.find(f => f.id === fileId);
     if (!fileInfo) return;
 
-    const filePath = (session as any).filePaths?.[fileId];
+    const key = `${session.id}:${fileId}`;
+    const writeStream = this.writeStreams.get(key);
+    if (writeStream) {
+      await new Promise<void>((resolve) => {
+        writeStream.end(() => {
+          this.writeStreams.delete(key);
+          resolve();
+        });
+      });
+    }
 
+    (session as any).fileProgress = (session as any).fileProgress || {};
+    (session as any).fileProgress[fileId] = {
+      transferred: fileInfo.size,
+      completed: true,
+    };
+
+    const filePath = (session as any).filePaths?.[fileId];
     if (filePath) {
       const isValid = await this.fileService.verifyFileChecksum(filePath, checksum);
       if (!isValid) {
@@ -266,8 +308,7 @@ export class TransferService extends EventEmitter {
     log.info(`File ${fileInfo.name} transferred and verified successfully`);
 
     const allComplete = session.files.every(f => {
-      const fSession = (session as any).fileProgress?.[f.id];
-      return fSession?.completed;
+      return (session as any).fileProgress?.[f.id]?.completed;
     });
 
     if (allComplete) {
@@ -279,7 +320,7 @@ export class TransferService extends EventEmitter {
     this.emitSessionUpdate(session);
   }
 
-  private async handleResume(socket: net.Socket, message: ResumePayload): Promise<void> {
+  private async handleResume(socket: net.Socket, message: any): Promise<void> {
     const session = this.sessions.get(message.sessionId);
     if (!session) return;
 
@@ -292,7 +333,7 @@ export class TransferService extends EventEmitter {
 
     log.info(`Resuming session ${session.id} from byte ${lastAcknowledgedByte}`);
     this.emitSessionUpdate(session);
-    this.startSendingChunks(session, socket);
+    await this.startSendingChunks(session, socket);
   }
 
   private async handleError(socket: net.Socket, message: any): Promise<void> {
@@ -309,9 +350,9 @@ export class TransferService extends EventEmitter {
     return this.writeStreams.get(key) || null;
   }
 
-  private async createWriteStream(session: TransferSession, fileId: string): Promise<fs.WriteStream> {
+  private async createWriteStream(session: TransferSession, fileId: string): Promise<fs.WriteStream | null> {
     const fileInfo = session.files.find(f => f.id === fileId);
-    if (!fileInfo) throw new Error(`File ${fileId} not found`);
+    if (!fileInfo) return null;
 
     const downloadPath = (session as any).downloadPath || '';
     let filePath = path.join(downloadPath, fileInfo.name);
@@ -325,13 +366,16 @@ export class TransferService extends EventEmitter {
     const key = `${session.id}:${fileId}`;
     this.writeStreams.set(key, stream);
 
+    log.info(`Created write stream for ${fileInfo.name} -> ${filePath}`);
     return stream;
   }
 
   private async startSendingChunks(session: TransferSession, socket: net.Socket): Promise<void> {
-    const fileInfo = session.files[0];
+    const currentFileIndex = (session as any).currentFileIndex || 0;
+    const fileInfo = session.files[currentFileIndex];
     if (!fileInfo) {
       session.status = 'completed';
+      session.completedAt = Date.now();
       this.emit('session-completed', session);
       return;
     }
@@ -341,110 +385,40 @@ export class TransferService extends EventEmitter {
     session.acknowledgedChunks = new Set();
     session.lastAcknowledgedByte = 0;
 
-    (session as any).currentFileIndex = 0;
+    (session as any).currentFileIndex = currentFileIndex;
     (session as any).fileProgress = (session as any).fileProgress || {};
     (session as any).fileProgress[fileInfo.id] = {
       transferred: 0,
       completed: false,
     };
 
-    await this.sendChunksForFile(session, socket, fileInfo);
+    log.info(`Starting to send ${fileInfo.name} (${fileInfo.size} bytes, ${chunks.length} chunks)`);
+    await this.sendNextChunk(session, socket);
   }
 
-  private async sendChunksForFile(
-    session: TransferSession,
-    socket: net.Socket,
-    fileInfo: FileInfo
-  ): Promise<void> {
-    const chunks = session.chunks;
-    const filePath = fileInfo.path;
-    const startTime = Date.now();
-    let bytesSent = 0;
+  private async readChunkData(filePath: string, offset: number, size: number): Promise<Buffer | null> {
+    try {
+      const fd = await fs.promises.open(filePath, 'r');
+      const buffer = Buffer.alloc(size);
+      const { bytesRead } = await fd.read(buffer, 0, size, offset);
+      await fd.close();
+      return buffer.slice(0, bytesRead);
+    } catch (err) {
+      log.error(`Failed to read chunk at offset ${offset}: ${err}`);
+      return null;
+    }
+  }
 
-    const readStream = this.fileService.createReadStream(filePath);
+  private async sendNextChunk(session: TransferSession, socket: net.Socket): Promise<void> {
+    const unacknowledged = session.chunks.find(
+      c => !session.acknowledgedChunks.has(c.index)
+    );
 
-    let currentChunkIndex = 0;
+    if (!unacknowledged) {
+      const currentFileIndex = (session as any).currentFileIndex || 0;
+      const fileInfo = session.files[currentFileIndex];
 
-    const sendNextAvailableChunk = async (): Promise<void> => {
-      while (currentChunkIndex < chunks.length) {
-        const chunk = chunks[currentChunkIndex];
-        if (session.acknowledgedChunks.has(chunk.index)) {
-          currentChunkIndex++;
-          continue;
-        }
-
-        const connectionKey = `${socket.remoteAddress}:${socket.remotePort}`;
-        const connection = this.connections.get(connectionKey);
-        if (connection && connection.chunkIndex === chunk.index) {
-          return;
-        }
-
-        const chunkData = await this.readChunkFromStream(
-          readStream,
-          chunk.offset,
-          chunk.size
-        );
-
-        if (!chunkData) break;
-
-        const checksum = await this.fileService.calculateChunkChecksum(chunkData);
-
-        const payload: ChunkPayload = {
-          sessionId: session.id,
-          fileId: fileInfo.id,
-          chunkIndex: chunk.index,
-          offset: chunk.offset,
-          data: chunkData,
-          checksum,
-        };
-
-        this.sendMessage(socket, payload);
-
-        const connKey = `${socket.remoteAddress}:${socket.remotePort}`;
-        this.connections.set(connKey, {
-          socket,
-          sessionId: session.id,
-          fileId: fileInfo.id,
-          chunkIndex: chunk.index,
-          retries: 0,
-        });
-
-        currentChunkIndex++;
-        bytesSent += chunkData.length;
-
-        session.transferredBytes += chunkData.length;
-
-        const elapsed = (Date.now() - startTime) / 1000;
-        session.speed = bytesSent / elapsed;
-        if (session.speed > 0) {
-          session.remainingTime = (session.totalSize - session.transferredBytes) / session.speed;
-        }
-
-        const now = Date.now();
-        if (session.speedHistory.length === 0 ||
-            now - session.speedHistory[session.speedHistory.length - 1].timestamp >= 500) {
-          session.speedHistory.push({
-            timestamp: now,
-            bytesPerSecond: session.speed,
-          });
-          if (session.speedHistory.length > 60) {
-            session.speedHistory.shift();
-          }
-        }
-
-        this.emitSessionUpdate(session);
-        return;
-      }
-    };
-
-    readStream.on('data', async () => {
-      await sendNextAvailableChunk();
-    });
-
-    readStream.on('end', async () => {
-      while (currentChunkIndex < chunks.length) {
-        await sendNextAvailableChunk();
-      }
+      if (!fileInfo) return;
 
       const fileChecksum = await this.fileService.calculateFileChecksum(fileInfo.path);
       this.sendMessage(socket, {
@@ -456,86 +430,38 @@ export class TransferService extends EventEmitter {
 
       (session as any).fileProgress[fileInfo.id].completed = true;
 
-      const nextFileIndex = (session as any).currentFileIndex + 1;
+      const nextFileIndex = currentFileIndex + 1;
       if (nextFileIndex < session.files.length) {
         (session as any).currentFileIndex = nextFileIndex;
         const nextFile = session.files[nextFileIndex];
-        const nextChunks = this.fileService.createChunks(nextFile.size, nextFile.id);
-        session.chunks = nextChunks;
+        session.chunks = this.fileService.createChunks(nextFile.size, nextFile.id);
         session.acknowledgedChunks = new Set();
         session.lastAcknowledgedByte = 0;
         (session as any).fileProgress[nextFile.id] = {
           transferred: 0,
           completed: false,
         };
-        await this.sendChunksForFile(session, socket, nextFile);
+        log.info(`Moving to next file: ${nextFile.name}`);
+        await this.sendNextChunk(session, socket);
       } else {
         session.status = 'completed';
         session.completedAt = Date.now();
         this.emit('session-completed', session);
       }
-    });
+      return;
+    }
 
-    readStream.on('error', (err) => {
-      log.error(`Read stream error for ${fileInfo.path}:`, err);
-      session.status = 'failed';
-      session.error = err.message;
-      this.emit('session-error', session.id, err.message);
-    });
-  }
-
-  private async readChunkFromStream(
-    stream: fs.ReadStream,
-    offset: number,
-    size: number
-  ): Promise<Buffer | null> {
-    return new Promise((resolve) => {
-      const chunks: Buffer[] = [];
-      let totalBytes = 0;
-
-      const handler = (data: Buffer | string) => {
-        const chunk = typeof data === 'string' ? Buffer.from(data) : data;
-        chunks.push(chunk);
-        totalBytes += chunk.length;
-
-        if (totalBytes >= size) {
-          stream.pause();
-          const result = Buffer.concat(chunks).slice(0, size);
-          stream.removeListener('data', handler);
-          resolve(result);
-        }
-      };
-
-      stream.on('data', handler);
-      stream.on('end', () => {
-        if (chunks.length > 0) {
-          resolve(Buffer.concat(chunks));
-        } else {
-          resolve(null);
-        }
-      });
-      stream.on('error', () => resolve(null));
-    });
-  }
-
-  private async sendNextChunk(session: TransferSession, socket: net.Socket): Promise<void> {
-    const unacknowledged = session.chunks.find(
-      c => !session.acknowledgedChunks.has(c.index)
-    );
-
-    if (!unacknowledged) return;
-
-    const fileInfo = session.files[(session as any).currentFileIndex];
+    const currentFileIndex = (session as any).currentFileIndex || 0;
+    const fileInfo = session.files[currentFileIndex];
     if (!fileInfo) return;
 
-    const filePath = fileInfo.path;
-    const chunkData = await this.readChunkFromStream(
-      this.fileService.createReadStream(filePath),
-      unacknowledged.offset,
-      unacknowledged.size
-    );
-
-    if (!chunkData) return;
+    const chunkData = await this.readChunkData(fileInfo.path, unacknowledged.offset, unacknowledged.size);
+    if (!chunkData) {
+      session.status = 'failed';
+      session.error = `Failed to read chunk ${unacknowledged.index}`;
+      this.emit('session-error', session.id, session.error);
+      return;
+    }
 
     const checksum = await this.fileService.calculateChunkChecksum(chunkData);
 
@@ -557,21 +483,48 @@ export class TransferService extends EventEmitter {
       chunkIndex: unacknowledged.index,
       retries: 0,
     });
+
+    session.transferredBytes += chunkData.length;
+
+    const elapsed = (Date.now() - session.startedAt) / 1000;
+    if (elapsed > 0) {
+      session.speed = session.transferredBytes / elapsed;
+      if (session.speed > 0) {
+        session.remainingTime = (session.totalSize - session.transferredBytes) / session.speed;
+      }
+    }
+
+    const now = Date.now();
+    if (session.speedHistory.length === 0 ||
+        now - session.speedHistory[session.speedHistory.length - 1].timestamp >= 500) {
+      session.speedHistory.push({
+        timestamp: now,
+        bytesPerSecond: session.speed,
+      });
+      if (session.speedHistory.length > 60) {
+        session.speedHistory.shift();
+      }
+    }
+
+    (session as any).fileProgress = (session as any).fileProgress || {};
+    (session as any).fileProgress[fileInfo.id] = (session as any).fileProgress[fileInfo.id] || {
+      transferred: 0,
+      completed: false,
+    };
+    (session as any).fileProgress[fileInfo.id].transferred += chunkData.length;
+
+    this.emitSessionUpdate(session);
   }
 
   private async resendChunk(session: TransferSession, connection: ActiveConnection): Promise<void> {
-    const fileInfo = session.files[(session as any).currentFileIndex];
+    const currentFileIndex = (session as any).currentFileIndex || 0;
+    const fileInfo = session.files[currentFileIndex];
     if (!fileInfo) return;
 
     const chunk = session.chunks.find(c => c.index === connection.chunkIndex);
     if (!chunk) return;
 
-    const chunkData = await this.readChunkFromStream(
-      this.fileService.createReadStream(fileInfo.path),
-      chunk.offset,
-      chunk.size
-    );
-
+    const chunkData = await this.readChunkData(fileInfo.path, chunk.offset, chunk.size);
     if (!chunkData) return;
 
     const checksum = await this.fileService.calculateChunkChecksum(chunkData);
@@ -682,8 +635,14 @@ export class TransferService extends EventEmitter {
   }
 
   async acceptSession(sessionId: string, downloadPath: string): Promise<void> {
-    const incoming = this.pendingTransfers.get(sessionId);
-    if (!incoming) return;
+    const pending = this.pendingTransfers.get(sessionId);
+    if (!pending) {
+      log.warn(`No pending transfer found for session ${sessionId}`);
+      return;
+    }
+
+    const incoming = pending.transfer;
+    const socket = pending.socket;
 
     const session: TransferSession = {
       id: sessionId,
@@ -704,14 +663,32 @@ export class TransferService extends EventEmitter {
     };
 
     (session as any).downloadPath = downloadPath;
-    this.sessions.set(sessionId, session);
+    (session as any).fileProgress = {};
+    (session as any).filePaths = {};
 
-    log.info(`Accepted incoming transfer ${sessionId}`);
+    this.sessions.set(sessionId, session);
+    this.pendingTransfers.delete(sessionId);
+
+    this.sendMessage(socket, {
+      type: 'accept',
+      sessionId,
+    });
+
+    log.info(`Accepted incoming transfer ${sessionId}, sent accept to sender`);
   }
 
   async rejectSession(sessionId: string): Promise<void> {
-    this.pendingTransfers.delete(sessionId);
-    log.info(`Rejected incoming transfer ${sessionId}`);
+    const pending = this.pendingTransfers.get(sessionId);
+    if (pending) {
+      this.sendMessage(pending.socket, {
+        type: 'reject',
+        sessionId,
+      });
+      this.pendingTransfers.delete(sessionId);
+      log.info(`Rejected incoming transfer ${sessionId}, sent reject to sender`);
+    } else {
+      log.warn(`No pending transfer to reject for session ${sessionId}`);
+    }
   }
 
   async cancelSession(sessionId: string): Promise<void> {
@@ -723,6 +700,7 @@ export class TransferService extends EventEmitter {
     for (const [key, stream] of this.writeStreams) {
       if (key.startsWith(sessionId)) {
         stream.end();
+        this.writeStreams.delete(key);
       }
     }
 
@@ -779,23 +757,14 @@ export class TransferService extends EventEmitter {
     try {
       log.info(`Attempting to reconnect session ${session.id}`);
 
-      const device: Device = {
-        id: session.deviceId,
-        name: session.deviceName,
-        ip: session.deviceId,
-        port: 51235,
-        lastSeen: Date.now(),
-        isLocal: false,
-      };
-
       const options: tls.ConnectionOptions = {
-        host: device.ip,
-        port: device.port,
+        host: session.deviceId,
+        port: TRANSFER_PORT,
         rejectUnauthorized: false,
       };
 
       const socket = tls.connect(options, () => {
-        log.info(`Reconnected to ${device.ip}:${device.port} for session ${session.id}`);
+        log.info(`Reconnected for session ${session.id}`);
         session.status = 'transferring';
         this.emitSessionUpdate(session);
 

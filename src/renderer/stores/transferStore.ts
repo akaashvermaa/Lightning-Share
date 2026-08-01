@@ -34,11 +34,17 @@ export const useTransferStore = create<TransferState>((set, get) => ({
   },
 
   updateSession: (session) => {
-    set({
-      sessions: get().sessions.map(s =>
-        s.id === session.id ? session : s
-      ),
-    });
+    const sessions = get().sessions;
+    const exists = sessions.some(s => s.id === session.id);
+    if (exists) {
+      set({
+        sessions: sessions.map(s =>
+          s.id === session.id ? session : s
+        ),
+      });
+    } else {
+      set({ sessions: [...sessions, session] });
+    }
   },
 
   removeSession: (sessionId) => {
@@ -72,6 +78,26 @@ export const useTransferStore = create<TransferState>((set, get) => ({
 
   acceptTransfer: async (sessionId) => {
     await window.lightningshare.acceptTransfer(sessionId);
+    const incoming = get().incomingTransfers.find(t => t.sessionId === sessionId);
+    if (incoming) {
+      get().addSession({
+        id: sessionId,
+        deviceId: incoming.deviceId,
+        deviceName: incoming.deviceName,
+        files: incoming.files,
+        totalSize: incoming.totalSize,
+        transferredBytes: 0,
+        status: 'transferring',
+        direction: 'receiving',
+        speed: 0,
+        remainingTime: 0,
+        startedAt: Date.now(),
+        chunks: [],
+        acknowledgedChunks: new Set(),
+        lastAcknowledgedByte: 0,
+        speedHistory: [],
+      });
+    }
     get().clearIncomingTransfer(sessionId);
   },
 

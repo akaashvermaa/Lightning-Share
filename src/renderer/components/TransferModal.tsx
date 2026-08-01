@@ -9,6 +9,7 @@ interface TransferModalProps {
 export default function TransferModal({ deviceId, onClose }: TransferModalProps) {
   const [files, setFiles] = useState<FileInfo[]>([]);
   const [isSending, setIsSending] = useState(false);
+  const [sendStatus, setSendStatus] = useState<'idle' | 'uploading' | 'sent' | 'error'>('idle');
 
   const handleSelectFiles = async () => {
     const selected = await window.lightningshare.selectFiles();
@@ -27,31 +28,89 @@ export default function TransferModal({ deviceId, onClose }: TransferModalProps)
   const handleSend = async () => {
     if (files.length === 0) return;
     setIsSending(true);
-    await window.lightningshare.startTransfer(deviceId, files);
-    setIsSending(false);
-    onClose();
+    setSendStatus('uploading');
+    try {
+      const result = await window.lightningshare.startTransfer(deviceId, files);
+      if (result.success) {
+        setSendStatus('sent');
+        setTimeout(() => {
+          setIsSending(false);
+          onClose();
+        }, 1500);
+      } else {
+        setSendStatus('error');
+        setTimeout(() => setIsSending(false), 2000);
+      }
+    } catch (e) {
+      setSendStatus('error');
+      setTimeout(() => setIsSending(false), 2000);
+    }
+  };
+
+  const handleClearFiles = () => {
+    setFiles([]);
+    setSendStatus('idle');
   };
 
   const totalSize = files.reduce((sum, f) => sum + f.size, 0);
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 animate-fade-in">
       <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg mx-4">
         <div className="flex items-center justify-between p-6 border-b border-slate-200">
           <h2 className="text-xl font-semibold text-slate-900">Send Files</h2>
-          <button
-            onClick={onClose}
-            className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
-          >
-            <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <line x1="18" y1="6" x2="6" y2="18" />
-              <line x1="6" y1="6" x2="18" y2="18" />
-            </svg>
-          </button>
+          {!isSending && (
+            <button
+              onClick={onClose}
+              className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
+            >
+              <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <line x1="18" y1="6" x2="6" y2="18" />
+                <line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+          )}
         </div>
 
         <div className="p-6">
-          {files.length === 0 ? (
+          {sendStatus === 'sent' ? (
+            <div className="flex flex-col items-center py-8">
+              <div className="w-16 h-16 bg-green-50 rounded-full flex items-center justify-center mb-4">
+                <svg className="w-8 h-8 text-green-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <polyline points="20 6 9 17 4 12" />
+                </svg>
+              </div>
+              <h3 className="text-lg font-medium text-slate-900 mb-1">Transfer Request Sent</h3>
+              <p className="text-sm text-slate-500">
+                Waiting for the receiver to accept. You can track progress on the Transfers page.
+              </p>
+            </div>
+          ) : sendStatus === 'error' ? (
+            <div className="flex flex-col items-center py-8">
+              <div className="w-16 h-16 bg-red-50 rounded-full flex items-center justify-center mb-4">
+                <svg className="w-8 h-8 text-red-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <line x1="18" y1="6" x2="6" y2="18" />
+                  <line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+              </div>
+              <h3 className="text-lg font-medium text-slate-900 mb-1">Transfer Failed</h3>
+              <p className="text-sm text-slate-500">
+                Could not connect to the device. Make sure it's online and try again.
+              </p>
+            </div>
+          ) : sendStatus === 'uploading' ? (
+            <div className="flex flex-col items-center py-8">
+              <div className="w-16 h-16 bg-blue-50 rounded-full flex items-center justify-center mb-4">
+                <svg className="w-8 h-8 text-blue-500 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                </svg>
+              </div>
+              <h3 className="text-lg font-medium text-slate-900 mb-1">Connecting...</h3>
+              <p className="text-sm text-slate-500">
+                Sending transfer request to device...
+              </p>
+            </div>
+          ) : files.length === 0 ? (
             <div className="space-y-3">
               <button
                 onClick={handleSelectFiles}
@@ -75,13 +134,15 @@ export default function TransferModal({ deviceId, onClose }: TransferModalProps)
             </div>
           ) : (
             <div>
-              <div className="mb-4">
-                <span className="text-sm text-slate-500">
-                  {files.length} file{files.length > 1 ? 's' : ''} selected
-                </span>
-                <span className="text-sm text-slate-500 ml-2">
-                  ({formatBytes(totalSize)})
-                </span>
+              <div className="mb-4 flex items-center justify-between">
+                <div>
+                  <span className="text-sm text-slate-500">
+                    {files.length} file{files.length > 1 ? 's' : ''} selected
+                  </span>
+                  <span className="text-sm text-slate-500 ml-2">
+                    ({formatBytes(totalSize)})
+                  </span>
+                </div>
               </div>
               <div className="max-h-48 overflow-auto border border-slate-200 rounded-lg">
                 {files.map((file, index) => (
@@ -109,7 +170,7 @@ export default function TransferModal({ deviceId, onClose }: TransferModalProps)
                 ))}
               </div>
               <button
-                onClick={() => setFiles([])}
+                onClick={handleClearFiles}
                 className="mt-3 text-sm text-primary-600 hover:text-primary-700"
               >
                 Clear selection
@@ -118,21 +179,33 @@ export default function TransferModal({ deviceId, onClose }: TransferModalProps)
           )}
         </div>
 
-        <div className="flex gap-3 p-6 border-t border-slate-200">
-          <button
-            onClick={onClose}
-            className="flex-1 px-4 py-2 border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-50 transition-colors"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={handleSend}
-            disabled={files.length === 0 || isSending}
-            className="flex-1 px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-          >
-            {isSending ? 'Sending...' : 'Send'}
-          </button>
-        </div>
+        {sendStatus === 'idle' && (
+          <div className="flex gap-3 p-6 border-t border-slate-200">
+            <button
+              onClick={onClose}
+              disabled={isSending}
+              className="flex-1 px-4 py-2 border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-50 transition-colors disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleSend}
+              disabled={files.length === 0 || isSending}
+              className="flex-1 px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
+            >
+              {isSending ? (
+                <>
+                  <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                  </svg>
+                  Sending...
+                </>
+              ) : (
+                'Send'
+              )}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
