@@ -2,7 +2,7 @@ import * as dgram from 'dgram';
 import * as os from 'os';
 import { v4 as uuidv4 } from 'uuid';
 import { EventEmitter } from 'events';
-import log from 'electron-log';
+import log from '../../shared/logger';
 import { DiscoveryMessage, Device } from '../../shared/types';
 import {
   DISCOVERY_PORT,

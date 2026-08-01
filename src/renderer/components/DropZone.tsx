@@ -1,5 +1,4 @@
 import { useState, useRef, useCallback } from 'react';
-import { useAppStore } from '../stores/appStore';
 import { FileInfo } from '../../shared/types';
 
 interface DropZoneProps {
@@ -9,7 +8,6 @@ interface DropZoneProps {
 export default function DropZone({ onFilesSelected }: DropZoneProps) {
   const [isDragOver, setIsDragOver] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
-  const { startTransfer } = require('../stores/transferStore').useTransferStore.getState();
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();

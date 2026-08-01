@@ -4,7 +4,6 @@ import { useTransferStore } from '../stores/transferStore';
 import DeviceCard from '../components/DeviceCard';
 import TransferModal from '../components/TransferModal';
 import IncomingTransferToast from '../components/IncomingTransferToast';
-import DropZone from '../components/DropZone';
 
 export default function HomePage() {
   const { devices, localIp } = useAppStore();

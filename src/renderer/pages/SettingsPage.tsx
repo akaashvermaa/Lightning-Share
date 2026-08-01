@@ -10,6 +10,12 @@ export default function SettingsPage() {
     setLocalName(deviceName);
   }, [deviceName]);
 
+  const [localDownloadPath, setLocalDownloadPath] = useState(downloadPath);
+
+  useEffect(() => {
+    setLocalDownloadPath(downloadPath);
+  }, [downloadPath]);
+
   const handleSaveName = async () => {
     if (localName.trim() && localName !== deviceName) {
       setIsSaving(true);
@@ -19,9 +25,9 @@ export default function SettingsPage() {
   };
 
   const handleSelectDownloadPath = async () => {
-    const path = await window.lightningshare.selectDownloadPath();
-    if (path) {
-      setDownloadPath(path);
+    if (localDownloadPath && localDownloadPath !== downloadPath) {
+      const result = await window.lightningshare.setSettings({ downloadPath: localDownloadPath });
+      setDownloadPath(result.downloadPath);
     }
   };
 
@@ -62,14 +68,19 @@ export default function SettingsPage() {
               Files you receive will be saved to this folder.
             </p>
             <div className="flex items-center gap-3">
-              <div className="flex-1 px-4 py-2 bg-slate-50 border border-slate-200 rounded-lg text-slate-600 truncate">
-                {downloadPath || 'Not set'}
-              </div>
+              <input
+                type="text"
+                value={localDownloadPath}
+                onChange={(e) => setLocalDownloadPath(e.target.value)}
+                className="flex-1 px-4 py-2 bg-slate-50 border border-slate-200 rounded-lg text-slate-600 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+                placeholder="C:\Users\Downloads"
+              />
               <button
                 onClick={handleSelectDownloadPath}
-                className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors"
+                disabled={localDownloadPath === downloadPath}
+                className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
-                Browse
+                Save
               </button>
             </div>
           </section>

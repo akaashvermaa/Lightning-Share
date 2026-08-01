@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { createHash } from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
-import log from 'electron-log';
+import log from '../../shared/logger';
 import { FileInfo, ChunkInfo } from '../../shared/types';
 import { getChunkSizeForFile } from '../../shared/constants';
 

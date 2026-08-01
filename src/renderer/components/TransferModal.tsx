@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { FileInfo } from '../../shared/types';
 
 interface TransferModalProps {
@@ -18,9 +18,9 @@ export default function TransferModal({ deviceId, onClose }: TransferModalProps)
   };
 
   const handleSelectFolder = async () => {
-    const folder = await window.lightningshare.selectFolder();
-    if (folder) {
-      setFiles([folder]);
+    const folderFiles = await window.lightningshare.selectFolder();
+    if (folderFiles && folderFiles.length > 0) {
+      setFiles(folderFiles);
     }
   };
 

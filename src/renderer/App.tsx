@@ -8,13 +8,13 @@ import { useTransferStore } from './stores/transferStore';
 
 declare global {
   interface Window {
-    lightningshare: import('../preload/index').LightningShareAPI;
+    lightningshare: import('./api').LightningShareAPI;
   }
 }
 
 export default function App() {
   const { initialize, setDevices, addDevice, removeDevice } = useAppStore();
-  const { setSessions, addSession, updateSession, removeSession } = useTransferStore();
+  const { setSessions, updateSession } = useTransferStore();
 
   useEffect(() => {
     initialize();

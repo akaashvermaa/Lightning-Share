@@ -72,10 +72,6 @@ function TransferCard({ session }: { session: any }) {
   const isPaused = session.status === 'paused';
   const isCompleted = session.status === 'completed';
 
-  const handleOpenFile = async (filePath: string) => {
-    await window.lightningshare.openFile(filePath);
-  };
-
   const handleShowInFolder = async (filePath: string) => {
     await window.lightningshare.showFileInFolder(filePath);
   };

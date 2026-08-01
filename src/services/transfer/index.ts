@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { EventEmitter } from 'events';
 import { v4 as uuidv4 } from 'uuid';
-import log from 'electron-log';
+import log from '../../shared/logger';
 import {
   Device,
   FileInfo,

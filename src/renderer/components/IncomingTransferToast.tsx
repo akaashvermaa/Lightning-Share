@@ -7,7 +7,7 @@ interface IncomingTransferToastProps {
 }
 
 export default function IncomingTransferToast({ transfer }: IncomingTransferToastProps) {
-  const [isExpanded, setIsExpanded] = useState(false);
+  const [isExpanded] = useState(false);
   const { acceptTransfer, rejectTransfer } = useTransferStore();
 
   const totalSize = transfer.files.reduce((sum, f) => sum + f.size, 0);

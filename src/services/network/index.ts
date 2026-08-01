@@ -1,6 +1,6 @@
 import * as os from 'os';
 import { EventEmitter } from 'events';
-import log from 'electron-log';
+import log from '../../shared/logger';
 
 export interface NetworkInterface {
   name: string;
