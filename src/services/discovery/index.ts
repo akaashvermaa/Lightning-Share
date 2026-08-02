@@ -276,8 +276,11 @@ export class DiscoveryService extends EventEmitter {
     }, DISCOVERY_TIMEOUT / 2);
   }
 
-  private async measureRtt(ip: string, port: number): Promise<number | undefined> {
+  private async measureRtt(ip: string): Promise<number | undefined> {
     if (ip === 'mdns-discovered' || !ip) return undefined;
+    // Probe the plain HTTP API port (51236) to avoid triggering a TLS
+    // handshake error on the transfer server just to measure latency.
+    const HTTP_API_PORT = 51236;
     return new Promise((resolve) => {
       const start = Date.now();
       const socket = new net.Socket();
@@ -286,7 +289,7 @@ export class DiscoveryService extends EventEmitter {
         resolve(undefined);
       }, 2000);
 
-      socket.connect(port, ip, () => {
+      socket.connect(HTTP_API_PORT, ip, () => {
         const rtt = Date.now() - start;
         clearTimeout(timeout);
         socket.destroy();
@@ -355,7 +358,7 @@ export class DiscoveryService extends EventEmitter {
         // Measure RTT if we have a valid IP
         const ipToMeasure = device.addresses[0];
         if (ipToMeasure) {
-          const rtt = await this.measureRtt(ipToMeasure, message.port);
+          const rtt = await this.measureRtt(ipToMeasure);
           if (rtt !== undefined) {
             device.rtt = rtt;
           }
