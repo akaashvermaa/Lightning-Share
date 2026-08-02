@@ -31,6 +31,10 @@ export default defineConfig({
         target: 'ws://localhost:51236',
         ws: true,
       },
+      '/ws-stream': {
+        target: 'ws://localhost:51236',
+        ws: true,
+      },
     },
   },
 });

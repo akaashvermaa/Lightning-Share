@@ -85,8 +85,8 @@ function broadcastWS(event: string, data: any): void {
   });
 }
 
-function setupWSServer(server: http.Server): void {
-  wss = new WebSocketServer({ server, path: '/ws' });
+function setupWSServer(): WebSocketServer {
+  wss = new WebSocketServer({ noServer: true });
 
   wss.on('connection', (ws) => {
     log.info('WebSocket client connected');
@@ -110,6 +110,8 @@ function setupWSServer(server: http.Server): void {
       log.info('WebSocket client disconnected');
     });
   });
+
+  return wss;
 }
 
 // ---------------------------------------------------------------------------
@@ -138,8 +140,8 @@ interface StreamEntry {
   writeStream: fs.WriteStream | null;
 }
 
-function setupStreamWSServer(server: http.Server): void {
-  const streamWss = new WebSocketServer({ server, path: '/ws-stream' });
+function setupStreamWSServer(): WebSocketServer {
+  const streamWss = new WebSocketServer({ noServer: true });
 
   streamWss.on('connection', (ws) => {
     log.info('[StreamWS] Client connected');
@@ -307,6 +309,8 @@ function setupStreamWSServer(server: http.Server): void {
       }
     });
   });
+
+  return streamWss;
 }
 
 
@@ -788,8 +792,23 @@ async function main(): Promise<void> {
   const app = createApp();
   const server = http.createServer(app);
 
-  setupWSServer(server);
-  setupStreamWSServer(server);
+  const wssMain = setupWSServer();
+  const wssStream = setupStreamWSServer();
+
+  server.on('upgrade', (request, socket, head) => {
+    const pathname = request.url ? request.url.split('?')[0] : '';
+    if (pathname === '/ws') {
+      wssMain.handleUpgrade(request, socket as any, head, (ws) => {
+        wssMain.emit('connection', ws, request);
+      });
+    } else if (pathname === '/ws-stream') {
+      wssStream.handleUpgrade(request, socket as any, head, (ws) => {
+        wssStream.emit('connection', ws, request);
+      });
+    } else {
+      socket.destroy();
+    }
+  });
 
 
   server.listen(PORT, () => {
