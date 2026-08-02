@@ -225,6 +225,168 @@ function pickFolder_helper(): Promise<File[]> {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Async generator: lazily yields FileInfo entries from a FileSystemDirectoryHandle.
+// Ordering: small files first (README, configs, source), then large files.
+// ---------------------------------------------------------------------------
+async function* scanDirectory(
+  dirHandle: FileSystemDirectoryHandle,
+  relativePath = '',
+): AsyncGenerator<{ relativePath: string; isDirectory: boolean; file?: File }> {
+  const entries: FileSystemHandle[] = [];
+  for await (const entry of (dirHandle as any).values()) {
+    entries.push(entry);
+  }
+
+  const files: FileSystemFileHandle[] = [];
+  const dirs: FileSystemDirectoryHandle[] = [];
+  for (const entry of entries) {
+    if (entry.kind === 'file') {
+      files.push(entry as FileSystemFileHandle);
+    } else {
+      dirs.push(entry as FileSystemDirectoryHandle);
+    }
+  }
+
+  // Yield the directory itself if it's an empty folder
+  if (files.length === 0 && dirs.length === 0 && relativePath) {
+    yield { relativePath: relativePath.replace(/\\/g, '/'), isDirectory: true };
+    return;
+  }
+
+  // Sort files: large files last so the receiver sees progress immediately.
+  const fileObjects: { handle: FileSystemFileHandle; file: File }[] = [];
+  for (const handle of files) {
+    const file = await handle.getFile();
+    fileObjects.push({ handle, file });
+  }
+  fileObjects.sort((a, b) => a.file.size - b.file.size);
+
+  for (const { handle, file } of fileObjects) {
+    const p = relativePath ? `${relativePath}/${handle.name}` : handle.name;
+    yield {
+      relativePath: p.replace(/\\/g, '/'),
+      isDirectory: false,
+      file,
+    };
+  }
+
+  for (const subDir of dirs) {
+    const subPath = relativePath ? `${relativePath}/${subDir.name}` : subDir.name;
+    yield* scanDirectory(subDir, subPath);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// startStreamingSession: streams all files from a directory handle over the
+// existing ws-stream WebSocket to the backend.
+// ---------------------------------------------------------------------------
+async function startStreamingSession(
+  ws: WebSocket,
+  sessionId: string,
+  files: FileInfo[],
+): Promise<void> {
+  const CHUNK_SIZE = 512 * 1024; // 512 KB
+
+  for (const fileInfo of files) {
+    const fileRef = fileInfo.fileRef;
+    if (!fileRef) continue;
+
+    if (fileInfo.isDirectory) {
+      // FileSystemDirectoryHandle — use async generator
+      const dirHandle = fileRef as FileSystemDirectoryHandle;
+
+      for await (const { relativePath, isDirectory, file } of scanDirectory(dirHandle)) {
+        const entryId = crypto.randomUUID();
+
+        // Send manifest-entry control message
+        ws.send(JSON.stringify({
+          type: 'manifest-entry',
+          sessionId,
+          fileId: entryId,
+          path: relativePath,
+          size: file ? file.size : 0,
+          mtime: file ? file.lastModified : Date.now(),
+          mimeType: file ? (file.type || 'application/octet-stream') : '',
+          isDirectory,
+        }));
+
+        if (!isDirectory && file && file.size > 0) {
+          // Stream raw binary chunks
+          let offset = 0;
+          while (offset < file.size) {
+            const slice = file.slice(offset, offset + CHUNK_SIZE);
+            const buffer = await slice.arrayBuffer();
+
+            // Header: [4-byte fileId length][fileId UTF-8][4-byte chunkIndex][raw chunk]
+            const fileIdBytes = new TextEncoder().encode(entryId);
+            const chunkIndex = Math.floor(offset / CHUNK_SIZE);
+            const header = new ArrayBuffer(4 + fileIdBytes.byteLength + 4);
+            const view = new DataView(header);
+            view.setUint32(0, fileIdBytes.byteLength, false);
+            new Uint8Array(header, 4, fileIdBytes.byteLength).set(fileIdBytes);
+            view.setUint32(4 + fileIdBytes.byteLength, chunkIndex, false);
+
+            const combined = new Uint8Array(header.byteLength + buffer.byteLength);
+            combined.set(new Uint8Array(header), 0);
+            combined.set(new Uint8Array(buffer), header.byteLength);
+
+            ws.send(combined.buffer);
+            offset += buffer.byteLength;
+          }
+        }
+
+        // Signal end of this file
+        ws.send(JSON.stringify({ type: 'file-complete', sessionId, fileId: entryId }));
+      }
+    } else {
+      // Regular File object
+      const file = fileRef as File;
+      const entryId = fileInfo.id;
+      const normalizedPath = file.name.replace(/\\/g, '/');
+
+      ws.send(JSON.stringify({
+        type: 'manifest-entry',
+        sessionId,
+        fileId: entryId,
+        path: normalizedPath,
+        size: file.size,
+        mtime: file.lastModified,
+        mimeType: file.type || 'application/octet-stream',
+        isDirectory: false,
+      }));
+
+      if (file.size > 0) {
+        let offset = 0;
+        while (offset < file.size) {
+          const slice = file.slice(offset, offset + CHUNK_SIZE);
+          const buffer = await slice.arrayBuffer();
+
+          const fileIdBytes = new TextEncoder().encode(entryId);
+          const chunkIndex = Math.floor(offset / CHUNK_SIZE);
+          const header = new ArrayBuffer(4 + fileIdBytes.byteLength + 4);
+          const view = new DataView(header);
+          view.setUint32(0, fileIdBytes.byteLength, false);
+          new Uint8Array(header, 4, fileIdBytes.byteLength).set(fileIdBytes);
+          view.setUint32(4 + fileIdBytes.byteLength, chunkIndex, false);
+
+          const combined = new Uint8Array(header.byteLength + buffer.byteLength);
+          combined.set(new Uint8Array(header), 0);
+          combined.set(new Uint8Array(buffer), header.byteLength);
+
+          ws.send(combined.buffer);
+          offset += buffer.byteLength;
+        }
+      }
+
+      ws.send(JSON.stringify({ type: 'file-complete', sessionId, fileId: entryId }));
+    }
+  }
+
+  // Signal end of entire session manifest
+  ws.send(JSON.stringify({ type: 'manifest-done', sessionId }));
+}
+
 function serializeSessionForClient(session: any): TransferSession {
   return {
     ...session,
@@ -234,6 +396,10 @@ function serializeSessionForClient(session: any): TransferSession {
 
 export const lightningshareAPI = {
   getServerInfo: () => apiGet<any>('/server-info'),
+  getDiagnostics: () => apiGet<any>('/diagnostics'),
+  exportDiagnostics: () => {
+    window.open(`${API_BASE}/api/diagnostics/export`, '_blank', 'noopener,noreferrer');
+  },
   getDeviceId: () => apiGet<{ id: string }>('/device-id').then((r) => r.id),
   getDeviceName: () => apiGet<{ name: string }>('/device-name').then((r) => r.name),
   setDeviceName: (name: string) => apiPost('/device-name', { name }).then(() => true),
@@ -246,23 +412,113 @@ export const lightningshareAPI = {
   selectDownloadPath: () =>
     apiGet<{ path: string }>('/download-path').then((r) => r.path),
 
-  selectFiles: async (onProgress?: UploadProgressCallback): Promise<FileInfo[]> => {
+  // Returns FileInfo[] with fileRef attached — no pre-upload.
+  selectFiles: async (_onProgress?: UploadProgressCallback): Promise<FileInfo[]> => {
     const files = await pickFiles_helper(true);
     if (files.length === 0) return [];
-    return uploadFiles(files, onProgress);
+    return files.map((f) => ({
+      id: crypto.randomUUID(),
+      name: f.name,
+      path: f.name,
+      size: f.size,
+      isDirectory: false,
+      mimeType: f.type || 'application/octet-stream',
+      mtime: f.lastModified,
+      fileRef: f,
+    }));
   },
 
-  selectFolder: async (onProgress?: UploadProgressCallback): Promise<FileInfo[] | null> => {
+  // Legacy helper still used by DropZone drag-and-drop.
+  uploadFiles: (files: File[], onProgress?: UploadProgressCallback) =>
+    uploadFiles(files, onProgress),
+
+  // Prefer showDirectoryPicker (lazy, streaming). Falls back to webkitdirectory.
+  selectFolder: async (_onProgress?: UploadProgressCallback): Promise<FileInfo[] | null> => {
+    if ('showDirectoryPicker' in window) {
+      try {
+        const handle = await (window as any).showDirectoryPicker({ mode: 'read' });
+        return [{
+          id: crypto.randomUUID(),
+          name: handle.name,
+          path: handle.name,
+          size: 0,
+          isDirectory: true,
+          mimeType: 'application/x-directory',
+          fileRef: handle,
+        }];
+      } catch (err) {
+        if ((err as Error).name === 'AbortError') return null;
+        // Permission/SecurityError — fall through to legacy picker
+      }
+    }
+
+    // Fallback: webkitdirectory loads all File objects into memory upfront.
     const files = await pickFolder_helper();
     if (files.length === 0) return null;
-    return uploadFiles(files, onProgress);
+    return [{
+      id: crypto.randomUUID(),
+      name: files[0]?.webkitRelativePath?.split('/')[0] || 'Selected Folder',
+      path: 'Selected Folder',
+      size: files.reduce((acc, f) => acc + f.size, 0),
+      isDirectory: true,
+      mimeType: 'application/x-directory',
+      fileRef: files, // Array<File> instead of FileSystemDirectoryHandle
+    }];
   },
 
   startTransfer: async (
     deviceId: string,
     files: FileInfo[]
   ): Promise<{ success: boolean; sessionId?: string; error?: string }> => {
-    return apiPost('/transfer/start', { deviceId, files });
+    return new Promise((resolve) => {
+      const wsUrl = `ws://${location.host}/ws-stream`;
+      const streamWs = new WebSocket(wsUrl);
+      streamWs.binaryType = 'arraybuffer';
+
+      const timeout = setTimeout(() => {
+        resolve({ success: false, error: 'Connection timed out' });
+        streamWs.close();
+      }, 10000);
+
+      streamWs.onopen = () => {
+        streamWs.send(JSON.stringify({ type: 'start', deviceId, fileCount: files.length }));
+      };
+
+      streamWs.onmessage = async (event) => {
+        if (typeof event.data === 'string') {
+          const msg = JSON.parse(event.data);
+
+          if (msg.type === 'ready') {
+            clearTimeout(timeout);
+            resolve({ success: true, sessionId: msg.sessionId });
+            // Stream all files without blocking the resolve
+            startStreamingSession(streamWs, msg.sessionId, files).catch((err) => {
+              console.error('[StreamTransfer] Streaming error:', err);
+            });
+          } else if (msg.type === 'error') {
+            clearTimeout(timeout);
+            resolve({ success: false, error: msg.error });
+            streamWs.close();
+          }
+        }
+      };
+
+      streamWs.onerror = () => {
+        clearTimeout(timeout);
+        resolve({ success: false, error: 'WebSocket connection failed — falling back to HTTP' });
+        streamWs.close();
+        // Fallback: old HTTP upload + REST start
+        apiPost<{ success: boolean; sessionId?: string; error?: string }>(
+          '/transfer/start',
+          { deviceId, files: files.map((f) => ({ ...f, fileRef: undefined })) }
+        ).then(resolve).catch(() => resolve({ success: false, error: 'Transfer start failed' }));
+      };
+
+      streamWs.onclose = () => {
+        // If we haven't resolved yet
+        clearTimeout(timeout);
+      };
+    });
   },
 
   acceptTransfer: async (sessionId: string, downloadPath?: string) => {
@@ -287,6 +543,7 @@ export const lightningshareAPI = {
       throw e;
     }
   },
+
   rejectTransfer: async (sessionId: string) => {
     console.log('[API] rejectTransfer POST', { sessionId });
     try {
@@ -309,6 +566,7 @@ export const lightningshareAPI = {
       throw e;
     }
   },
+
   cancelTransfer: (sessionId: string) =>
     apiPost('/transfer/cancel', { sessionId }).then(() => ({ success: true })),
   pauseTransfer: (sessionId: string) =>

@@ -8,7 +8,7 @@ interface DeviceCardProps {
 
 export default function DeviceCard({ device, onSend, disabled }: DeviceCardProps) {
   return (
-    <div className="bg-white rounded-lg border border-slate-200 p-4 hover:border-primary-300 hover:shadow-md transition-all">
+    <div className="bg-white rounded-xl border border-slate-200 p-4 hover:border-primary-300 hover:shadow-md transition-all">
       <div className="flex items-center gap-4">
         <div className="w-12 h-12 bg-primary-100 rounded-full flex items-center justify-center">
           <svg className="w-6 h-6 text-primary-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -19,7 +19,7 @@ export default function DeviceCard({ device, onSend, disabled }: DeviceCardProps
         </div>
         <div className="flex-1 min-w-0">
           <h4 className="font-medium text-slate-900 truncate">{device.name}</h4>
-          <p className="text-sm text-slate-500">{device.ip}</p>
+          <p className="text-sm text-slate-500 font-mono">{device.addresses?.[0] || 'Unknown IP'}:{device.port}</p>
         </div>
         <span className="flex items-center gap-1.5 text-sm text-success">
           <span className="w-2 h-2 bg-success rounded-full animate-pulse" />
@@ -31,7 +31,7 @@ export default function DeviceCard({ device, onSend, disabled }: DeviceCardProps
           onClick={disabled ? undefined : onSend}
           disabled={disabled}
           title={disabled ? 'Run LightningShare on this device first to send files' : `Send files to ${device.name}`}
-          className={`flex-1 px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
+          className={`flex-1 px-4 py-2.5 text-sm font-medium rounded-lg transition-colors ${
             disabled
               ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
               : 'bg-primary-600 text-white hover:bg-primary-700 cursor-pointer'

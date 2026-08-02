@@ -3,6 +3,8 @@ import * as tls from 'tls';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { deflateRaw, inflateRaw } from 'zlib';
+import { promisify } from 'util';
 import { EventEmitter } from 'events';
 import { v4 as uuidv4 } from 'uuid';
 import log from '../../shared/logger';
@@ -14,6 +16,7 @@ import {
 } from '../../shared/types';
 import { FileService } from '../file';
 import { certificateManager } from './certificate';
+import { encodeFrame, decodeFrame } from './protocol';
 import {
   TRANSFER_PORT,
   MAX_CHUNK_RETRIES,
@@ -21,7 +24,9 @@ import {
   TRANSFER_WINDOW_SIZE,
   MIN_TRANSFER_WINDOW_SIZE,
   MAX_TRANSFER_WINDOW_SIZE,
-  getChunkSizeForFile,
+  MAX_TRANSFER_FRAME_SIZE,
+  TCP_KEEPALIVE,
+  shouldCompress,
 } from '../../shared/constants';
 
 interface ActiveConnection {
@@ -30,6 +35,7 @@ interface ActiveConnection {
   fileId: string;
   chunkIndex: number;
   retries: number;
+  timeout?: NodeJS.Timeout;
 }
 
 interface PendingTransfer {
@@ -37,72 +43,44 @@ interface PendingTransfer {
   socket: tls.TLSSocket | net.Socket;
 }
 
-const CONTROL_FRAME = 0;
-const CHUNK_FRAME = 1;
 const TRANSFER_STATE_DIR = path.join(os.homedir(), '.lightningshare');
 const TRANSFER_STATE_FILE = path.join(TRANSFER_STATE_DIR, 'transfers.json');
+const TRANSFER_STATE_VERSION = 3;
+const deflateRawAsync = promisify(deflateRaw);
+const inflateRawAsync = promisify(inflateRaw);
 
-function parseMessage(data: Buffer): any {
-  return JSON.parse(data.toString(), (key, value) => {
-    if (value && typeof value === 'object' && value.type === 'Buffer' && Array.isArray(value.data)) {
-      return Buffer.from(value.data);
-    }
-    return value;
-  });
+function sanitizeRelativePath(unsafePath: string): string {
+  // Reject absolute paths, UNC paths, and Windows device names
+  if (
+    /^(?:[a-zA-Z]:\\|\/|\\\\)/.test(unsafePath) || 
+    /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i.test(path.basename(unsafePath)) ||
+    unsafePath.includes('..') ||
+    unsafePath.includes('~/') ||
+    unsafePath.includes('%USERPROFILE%')
+  ) {
+    return path.basename(unsafePath).replace(/[\/\\]/g, '_');
+  }
+
+  return unsafePath.replace(/\\/g, '/').replace(/^\/+/, '');
 }
 
-function encodeFrame(message: any): Buffer {
-  let payload: Buffer;
-
-  if (message.type === 'chunk' && Buffer.isBuffer(message.data)) {
-    const { data, ...header } = message;
-    const headerBuffer = Buffer.from(JSON.stringify({
-      ...header,
-      dataLength: data.length,
-    }));
-    const frameHeader = Buffer.alloc(5);
-    frameHeader[0] = CHUNK_FRAME;
-    frameHeader.writeUInt32BE(headerBuffer.length, 1);
-    payload = Buffer.concat([frameHeader, headerBuffer, data]);
-  } else {
-    payload = Buffer.concat([
-      Buffer.from([CONTROL_FRAME]),
-      Buffer.from(JSON.stringify(message)),
-    ]);
-  }
-
-  const length = Buffer.alloc(4);
-  length.writeUInt32BE(payload.length);
-  return Buffer.concat([length, payload]);
+interface PersistedTransferState {
+  version: number;
+  updatedAt: number;
+  sessions: any[];
+  pendingTransfers: IncomingTransfer[];
 }
 
-function decodeFrame(frame: Buffer): any {
-  if (frame.length < 1) {
-    throw new Error('Transfer frame is empty');
-  }
+interface FileResumeRecord {
+  acknowledgedChunks: Set<number>;
+  contiguousBytes: number;
+  completed: boolean;
+}
 
-  if (frame[0] === CONTROL_FRAME) {
-    return parseMessage(frame.subarray(1));
-  }
-
-  if (frame[0] !== CHUNK_FRAME || frame.length < 5) {
-    throw new Error(`Unknown transfer frame type: ${frame[0]}`);
-  }
-
-  const headerLength = frame.readUInt32BE(1);
-  const headerStart = 5;
-  const dataStart = headerStart + headerLength;
-  if (dataStart > frame.length) {
-    throw new Error('Transfer chunk header exceeds frame length');
-  }
-
-  const header = JSON.parse(frame.subarray(headerStart, dataStart).toString());
-  const data = frame.subarray(dataStart);
-  if (header.dataLength !== data.length) {
-    throw new Error(`Transfer chunk length mismatch: expected ${header.dataLength}, got ${data.length}`);
-  }
-
-  return { ...header, data };
+interface ReconnectState {
+  attempts: number;
+  timer: NodeJS.Timeout | null;
+  inFlight: boolean;
 }
 
 function errorDetails(error: unknown): string {
@@ -123,11 +101,26 @@ export class TransferService extends EventEmitter {
   private fileService: FileService;
   private connections: Map<string, ActiveConnection> = new Map();
   private pendingTransfers: Map<string, PendingTransfer> = new Map();
-  private writeStreams: Map<string, fs.WriteStream> = new Map();
+  private pendingIncomingTransfers: Map<string, IncomingTransfer> = new Map();
+  private writeHandles: Map<string, fs.promises.FileHandle> = new Map();
   private fileHandles: Map<string, fs.promises.FileHandle> = new Map();
+  private chunkReadAhead: Map<string, Promise<Buffer | null>> = new Map();
+  private reconnects: Map<string, ReconnectState> = new Map();
+  private awaitingComplete: Set<string> = new Set();
   private persistTimer: NodeJS.Timeout | null = null;
   private localDeviceId: string = '';
   private localDeviceName: string = '';
+  private stopping = false;
+  private bandwidthLimitBytesPerSecond = 0;
+  private bandwidthTail: Promise<void> = Promise.resolve();
+  private compressionEnabled = true;
+  // Write Buffer Queue: one sequential promise chain per file so that
+  // concurrent chunk handlers never issue overlapping pwrite calls.
+  private writeQueues: Map<string, Promise<void>> = new Map();
+  // Persistent Send Queue: ordered list of session IDs waiting to connect.
+  // Sessions are processed one-at-a-time to avoid simultaneous reconnect races.
+  private sendQueue: string[] = [];
+  private sendQueueRunning = false;
 
   constructor(fileService: FileService) {
     super();
@@ -140,7 +133,22 @@ export class TransferService extends EventEmitter {
     try {
       if (!fs.existsSync(TRANSFER_STATE_FILE)) return;
 
-      const records = JSON.parse(fs.readFileSync(TRANSFER_STATE_FILE, 'utf8')) as any[];
+      const parsed: any = JSON.parse(fs.readFileSync(TRANSFER_STATE_FILE, 'utf8'));
+      if (!Array.isArray(parsed) && (!Number.isInteger(parsed?.version) || parsed.version > TRANSFER_STATE_VERSION)) {
+        throw new Error(`Unsupported transfer state version: ${parsed?.version ?? 'unknown'}`);
+      }
+      const records = Array.isArray(parsed) ? parsed : parsed?.sessions;
+      if (!Array.isArray(records)) throw new Error('Invalid transfer state format');
+
+      const pendingTransfers = Array.isArray(parsed)
+        ? []
+        : Array.isArray(parsed.pendingTransfers) ? parsed.pendingTransfers : [];
+      for (const pending of pendingTransfers) {
+        if (pending?.sessionId && Array.isArray(pending.files)) {
+          this.pendingIncomingTransfers.set(pending.sessionId, pending);
+        }
+      }
+
       for (const record of records) {
         if (!record?.id || !record.files || !Array.isArray(record.files)) continue;
 
@@ -156,6 +164,18 @@ export class TransferService extends EventEmitter {
           if (Array.isArray(record.internal.skippedFiles)) {
             (session as any).skippedFiles = new Set(record.internal.skippedFiles);
           }
+          if (record.internal.fileResume && typeof record.internal.fileResume === 'object') {
+            const fileResume: Record<string, FileResumeRecord> = {};
+            for (const [fileId, state] of Object.entries(record.internal.fileResume)) {
+              const value = state as any;
+              fileResume[fileId] = {
+                acknowledgedChunks: new Set(value.acknowledgedChunks || []),
+                contiguousBytes: Number(value.contiguousBytes) || 0,
+                completed: Boolean(value.completed),
+              };
+            }
+            (session as any).fileResume = fileResume;
+          }
         }
         if (active) {
           session.status = 'reconnecting';
@@ -163,9 +183,20 @@ export class TransferService extends EventEmitter {
 
         this.sessions.set(session.id, session);
       }
-      log.info(`Restored ${this.sessions.size} persisted transfer session(s)`);
+      log.info(
+        `Restored ${this.sessions.size} persisted transfer session(s) and ` +
+        `${this.pendingIncomingTransfers.size} pending request(s)`,
+      );
     } catch (err) {
       log.error(`Failed to restore persisted transfers:\n${errorDetails(err)}`);
+      try {
+        fs.copyFileSync(
+          TRANSFER_STATE_FILE,
+          `${TRANSFER_STATE_FILE}.corrupt-${Date.now()}`,
+        );
+      } catch {
+        // Preserve the original error when the diagnostic copy cannot be made.
+      }
     }
   }
 
@@ -195,11 +226,35 @@ export class TransferService extends EventEmitter {
             skippedFiles: internal.skippedFiles
               ? Array.from(internal.skippedFiles)
               : undefined,
+            fileResume: internal.fileResume
+              ? Object.fromEntries(Object.entries(internal.fileResume).map(([fileId, state]: [string, any]) => [
+                fileId,
+                {
+                  acknowledgedChunks: Array.from(state.acknowledgedChunks || []),
+                  contiguousBytes: state.contiguousBytes || 0,
+                  completed: Boolean(state.completed),
+                },
+              ]))
+              : undefined,
+            devicePort: internal.devicePort,
+            queuedAt: internal.queuedAt,
           },
         };
       });
+      const state: PersistedTransferState = {
+        version: TRANSFER_STATE_VERSION,
+        updatedAt: Date.now(),
+        sessions: records,
+        pendingTransfers: Array.from(this.pendingIncomingTransfers.values()),
+      };
       const tempFile = `${TRANSFER_STATE_FILE}.tmp`;
-      fs.writeFileSync(tempFile, JSON.stringify(records), 'utf8');
+      fs.writeFileSync(tempFile, JSON.stringify(state), 'utf8');
+      const tempHandle = fs.openSync(tempFile, 'r');
+      try {
+        fs.fsyncSync(tempHandle);
+      } finally {
+        fs.closeSync(tempHandle);
+      }
       fs.renameSync(tempFile, TRANSFER_STATE_FILE);
     } catch (err) {
       log.error(`Failed to persist transfers:\n${errorDetails(err)}`);
@@ -207,18 +262,81 @@ export class TransferService extends EventEmitter {
   }
 
   recoverPersistedSessions(): void {
-    for (const session of this.sessions.values()) {
-      if (session.direction === 'sending' && session.status === 'reconnecting') {
-        log.info(`Scheduling persisted transfer recovery for ${session.id}`);
-        setTimeout(() => this.attemptReconnect(session), 1000);
-      }
+    // Re-surface pending incoming transfer requests to the UI so the user can
+    // accept or reject them after a restart. Without this, restored
+    // pendingIncomingTransfers are invisible — the toasts never re-appear.
+    for (const pending of this.pendingIncomingTransfers.values()) {
+      log.info(`Re-emitting restored pending transfer request ${pending.sessionId} from ${pending.deviceName}`);
+      // Give the UI a moment to mount before firing the event.
+      setTimeout(() => this.emit('incoming-transfer', pending), 500);
     }
+
+    // Re-queue outbound sending sessions for reconnection.
+    const sendingSessions = Array.from(this.sessions.values())
+      .filter(s => s.direction === 'sending' && s.status === 'reconnecting')
+      .sort((a, b) => ((a as any).queuedAt || 0) - ((b as any).queuedAt || 0));
+
+    for (const session of sendingSessions) {
+      log.info(`Queuing persisted sending session ${session.id} for recovery`);
+      this.sendQueue.push(session.id);
+    }
+
+    if (this.sendQueue.length > 0) {
+      setTimeout(() => this.drainSendQueue(), 1000);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Send Queue: drains sessions one-at-a-time so reconnect attempts don't race.
+  // ---------------------------------------------------------------------------
+  private drainSendQueue(): void {
+    if (this.sendQueueRunning || this.sendQueue.length === 0) return;
+    this.sendQueueRunning = true;
+
+    const sessionId = this.sendQueue[0];
+    const session = this.sessions.get(sessionId);
+
+    if (!session || ['completed', 'cancelled', 'failed', 'declined'].includes(session.status)) {
+      this.sendQueue.shift();
+      this.sendQueueRunning = false;
+      this.drainSendQueue();
+      return;
+    }
+
+    log.info(`[SEND_QUEUE] Processing session ${sessionId} (${this.sendQueue.length} in queue)`);
+
+    // Listen for the session to either complete or fail before processing next.
+    const onDone = (s: TransferSession) => {
+      if (s.id !== sessionId) return;
+      if (['completed', 'cancelled', 'failed', 'declined', 'transferring'].includes(s.status)) {
+        this.removeListener('session-updated', onDone);
+        this.removeListener('session-completed', onDone);
+        this.sendQueue.shift();
+        this.sendQueueRunning = false;
+        // Small delay before next so the network isn't slammed
+        setTimeout(() => this.drainSendQueue(), 200);
+      }
+    };
+    this.on('session-updated', onDone);
+    this.on('session-completed', onDone);
+
+    void this.attemptReconnect(session);
   }
 
   setLocalDevice(deviceId: string, deviceName: string): void {
     this.localDeviceId = deviceId;
     this.localDeviceName = deviceName;
     log.info(`TransferService: local device set to ${deviceName} (${deviceId})`);
+  }
+
+  setBandwidthLimit(bytesPerSecond: number): void {
+    this.bandwidthLimitBytesPerSecond = Number.isFinite(bytesPerSecond) && bytesPerSecond > 0
+      ? bytesPerSecond
+      : 0;
+  }
+
+  setCompressionEnabled(enabled: boolean): void {
+    this.compressionEnabled = enabled;
   }
 
   async waitUntilReady(): Promise<void> {
@@ -277,6 +395,13 @@ export class TransferService extends EventEmitter {
     const remoteAddress = socketAddress(socket);
     log.info(`[TRACE] ENTER handleConnection ${remoteAddress}`);
     log.info(`[TRACE] INCOMING TLS CONNECTION ${remoteAddress}`);
+    socket.setKeepAlive(true, TCP_KEEPALIVE);
+    // Socket Buffer Optimization: tune kernel send/recv buffers and set a
+    // generous stream highWaterMark so Node doesn't fragment large writes.
+    try { (socket as any).setNoDelay(true); } catch {}
+    try { (socket as any).setSendBufferSize?.(4 * 1024 * 1024); } catch {}
+    try { (socket as any).setRecvBufferSize?.(4 * 1024 * 1024); } catch {}
+    (socket as any)._writableState && ((socket as any)._writableState.highWaterMark = 4 * 1024 * 1024);
 
     let buffer = Buffer.alloc(0);
 
@@ -285,6 +410,10 @@ export class TransferService extends EventEmitter {
 
       while (buffer.length >= 4) {
         const messageLength = buffer.readUInt32BE(0);
+        if (messageLength > MAX_TRANSFER_FRAME_SIZE) {
+          socket.destroy(new Error(`Transfer frame exceeds ${MAX_TRANSFER_FRAME_SIZE} bytes`));
+          return;
+        }
         if (buffer.length < 4 + messageLength) break;
 
         const messageData = buffer.slice(4, 4 + messageLength);
@@ -346,6 +475,9 @@ export class TransferService extends EventEmitter {
       case 'complete':
         await this.handleComplete(socket, message);
         break;
+      case 'complete-ack':
+        await this.handleCompleteAck(socket, message);
+        break;
       case 'resume':
         await this.handleResume(socket, message);
         break;
@@ -374,6 +506,8 @@ export class TransferService extends EventEmitter {
     };
 
     this.pendingTransfers.set(sessionId, { transfer: incomingTransfer, socket });
+    this.pendingIncomingTransfers.set(sessionId, incomingTransfer);
+    this.persistSessionsSoon();
     log.info(`[RECV_REQUEST] Stored pending transfer. Map now has: ${Array.from(this.pendingTransfers.keys()).join(', ')}`);
     this.emit('incoming-transfer', incomingTransfer);
     log.info(`[TRACE] EXIT handleTransferRequest session=${sessionId} incoming-transfer-emitted`);
@@ -390,6 +524,7 @@ export class TransferService extends EventEmitter {
 
     log.info(`[RECV_ACCEPT] Session status was '${session.status}', changing to 'transferring'`);
     session.status = 'transferring';
+    session.error = undefined;
     this.emitSessionUpdate(session);
     await this.startSendingChunks(session, socket);
     log.info(`[TRACE] EXIT handleAccept session=${message.sessionId}`);
@@ -405,7 +540,8 @@ export class TransferService extends EventEmitter {
     const matches: { fileId: string; skip: boolean }[] = [];
 
     for (const manifestFile of message.files || []) {
-      const candidatePath = path.join(downloadPath, manifestFile.name);
+      const sanitizedName = sanitizeRelativePath(manifestFile.name);
+      const candidatePath = path.join(downloadPath, sanitizedName);
       let skip = false;
 
       try {
@@ -456,6 +592,63 @@ export class TransferService extends EventEmitter {
     await this.startSendingChunks(session, socket);
   }
 
+  private getFileResumeState(session: TransferSession, fileId: string): FileResumeRecord {
+    const internal = session as any;
+    internal.fileResume = internal.fileResume || {};
+    internal.fileResume[fileId] = internal.fileResume[fileId] || {
+      acknowledgedChunks: new Set<number>(),
+      contiguousBytes: 0,
+      completed: false,
+    };
+    const state = internal.fileResume[fileId];
+    if (!(state.acknowledgedChunks instanceof Set)) {
+      state.acknowledgedChunks = new Set(state.acknowledgedChunks || []);
+    }
+    return state;
+  }
+
+  private updateContiguousBytes(session: TransferSession, fileId: string): number {
+    const state = this.getFileResumeState(session, fileId);
+    const fileInfo = session.files.find(file => file.id === fileId);
+    if (!fileInfo) return state.contiguousBytes;
+
+    const chunks = this.fileService.createChunks(fileInfo.size, fileId);
+    let contiguousBytes = 0;
+    for (const chunk of chunks) {
+      if (!state.acknowledgedChunks.has(chunk.index)) break;
+      contiguousBytes = chunk.offset + chunk.size;
+    }
+    state.contiguousBytes = contiguousBytes;
+    return contiguousBytes;
+  }
+
+  private getCurrentFileId(session: TransferSession): string | undefined {
+    const index = (session as any).currentFileIndex || 0;
+    return session.files[index]?.id;
+  }
+
+  private clearSessionConnections(sessionId: string): void {
+    for (const [key, connection] of this.connections) {
+      if (connection.sessionId !== sessionId) continue;
+      if (connection.timeout) clearTimeout(connection.timeout);
+      if (!connection.socket.destroyed) connection.socket.destroy();
+      this.connections.delete(key);
+    }
+  }
+
+  private getContiguousChunkIndex(session: TransferSession, fileId: string): number {
+    const state = this.getFileResumeState(session, fileId);
+    const file = session.files.find(item => item.id === fileId);
+    if (!file) return -1;
+    const chunks = this.fileService.createChunks(file.size, fileId);
+    let last = -1;
+    for (const chunk of chunks) {
+      if (!state.acknowledgedChunks.has(chunk.index)) break;
+      last = chunk.index;
+    }
+    return last;
+  }
+
   private async handleReject(socket: net.Socket, message: any): Promise<void> {
     const session = this.sessions.get(message.sessionId);
     if (!session) return;
@@ -475,13 +668,27 @@ export class TransferService extends EventEmitter {
     const { fileId, chunkIndex, offset, data, checksum } = message;
     log.debug(`[RECV_CHUNK] chunk ${chunkIndex} for file ${fileId}, offset=${offset}, dataLen=${data?.length || data?.data?.length || 0}`);
 
-    const chunkBuffer: Buffer = Buffer.isBuffer(data)
+    // Binary-only protocol: data is always a raw Buffer from decodeFrame.
+    // The base64 fallback path has been removed — all transfers are raw binary.
+    const wireBuffer: Buffer = Buffer.isBuffer(data)
       ? data
-      : message.dataEncoding === 'base64' && typeof data === 'string'
-      ? Buffer.from(data, 'base64')
       : Buffer.from(data.data || data);
 
-    const isValid = await this.fileService.verifyChunkChecksum(chunkBuffer, checksum);
+    const fileInfo = session.files.find(f => f.id === fileId);
+    if (!fileInfo) return;
+
+    let chunkBuffer: Buffer;
+    try {
+      chunkBuffer = message.compressed
+        ? await inflateRawAsync(wireBuffer)
+        : wireBuffer;
+    } catch {
+      chunkBuffer = Buffer.alloc(0);
+    }
+
+    const isValid = chunkBuffer.length > 0 || (fileInfo.size === 0 && !message.compressed)
+      ? await this.fileService.verifyChunkChecksum(chunkBuffer, checksum)
+      : false;
     if (!isValid) {
       log.warn(`Chunk ${chunkIndex} checksum mismatch for file ${fileId}`);
       this.sendMessage(socket, {
@@ -496,36 +703,81 @@ export class TransferService extends EventEmitter {
       return;
     }
 
-    const fileInfo = session.files.find(f => f.id === fileId);
-    if (!fileInfo) return;
-
-    let writeStream = this.getWriteStream(session.id, fileId);
-    if (!writeStream) {
-      writeStream = await this.createWriteStream(session, fileId, offset);
+    const expectedChunk = this.fileService
+      .createChunks(fileInfo.size, fileId)
+      .find(chunk => chunk.index === chunkIndex);
+    if (!expectedChunk || expectedChunk.offset !== offset || expectedChunk.size !== chunkBuffer.length ||
+      (message.uncompressedLength !== undefined && message.uncompressedLength !== chunkBuffer.length)) {
+      this.sendMessage(socket, {
+        type: 'ack',
+        sessionId: message.sessionId,
+        fileId,
+        chunkIndex,
+        acknowledgedByte: this.getFileResumeState(session, fileId).contiguousBytes,
+        checksum: '',
+        valid: false,
+      });
+      return;
     }
 
-    if (writeStream) {
-      if (!writeStream.write(chunkBuffer)) {
-        await new Promise<void>((resolve) => writeStream?.once('drain', resolve));
+    const resumeState = this.getFileResumeState(session, fileId);
+    if (resumeState.completed) {
+      this.sendMessage(socket, {
+        type: 'ack',
+        sessionId: message.sessionId,
+        fileId,
+        chunkIndex,
+        acknowledgedByte: resumeState.contiguousBytes,
+        checksum,
+        valid: true,
+      });
+      return;
+    }
+    if (!resumeState.acknowledgedChunks.has(chunkIndex)) {
+      const writeHandle = await this.createWriteHandle(session, fileId);
+      if (writeHandle) {
+        // Write Buffer Queue: chain onto the per-file queue so writes are
+        // sequential but we never block the chunk handler with fsync per chunk.
+        const queueKey = `${session.id}:${fileId}`;
+        const prevWrite = this.writeQueues.get(queueKey) ?? Promise.resolve();
+        const nextWrite = prevWrite.then(() =>
+          writeHandle.write(chunkBuffer, 0, chunkBuffer.length, offset).then(() => {
+            // Track metrics without awaiting
+            const metrics = session as any;
+            metrics.writeBytes = (metrics.writeBytes || 0) + chunkBuffer.length;
+            metrics.writeStartedAt = metrics.writeStartedAt || Date.now();
+            metrics.writeSpeed = metrics.writeBytes / Math.max((Date.now() - metrics.writeStartedAt) / 1000, 0.001);
+          })
+        ).catch((err) => {
+          log.error(`[WRITE_QUEUE] Write error for chunk ${chunkIndex} of ${fileId}: ${err}`);
+        });
+        this.writeQueues.set(queueKey, nextWrite);
+        // Await so that ack is only sent after the write is committed to the queue
+        await nextWrite;
       }
+      resumeState.acknowledgedChunks.add(chunkIndex);
     }
+    const contiguousBytes = this.updateContiguousBytes(session, fileId);
 
     (session as any).fileProgress = (session as any).fileProgress || {};
     (session as any).fileProgress[fileId] = (session as any).fileProgress[fileId] || {
       transferred: 0,
       completed: false,
     };
-    (session as any).fileProgress[fileId].transferred += chunkBuffer.length;
+    const fileChunks = this.fileService.createChunks(fileInfo.size, fileId);
+    (session as any).fileProgress[fileId].transferred = Array.from(resumeState.acknowledgedChunks)
+      .map(index => fileChunks[index]?.size || 0)
+      .reduce((sum, size) => sum + size, 0);
 
-    session.lastAcknowledgedByte = offset + chunkBuffer.length;
-    session.acknowledgedChunks.add(chunkIndex);
+    session.lastAcknowledgedByte = contiguousBytes;
+    session.acknowledgedChunks = resumeState.acknowledgedChunks;
 
     this.sendMessage(socket, {
       type: 'ack',
       sessionId: message.sessionId,
       fileId,
       chunkIndex,
-      acknowledgedByte: session.lastAcknowledgedByte,
+      acknowledgedByte: contiguousBytes,
       checksum,
       valid: true,
     });
@@ -539,11 +791,13 @@ export class TransferService extends EventEmitter {
 
     log.debug(`[RECV_ACK] chunk ${message.chunkIndex} valid=${message.valid} for session ${message.sessionId}`);
 
-    const connectionKey = `${socket.remoteAddress}:${socket.remotePort}:${message.chunkIndex}`;
+    const connectionKey = `${socket.remoteAddress}:${socket.remotePort}:${message.fileId}:${message.chunkIndex}`;
     const connection = this.connections.get(connectionKey);
 
     if (!message.valid) {
       log.warn(`Chunk ${message.chunkIndex} failed verification, will retry`);
+      const metrics = session as any;
+      metrics.totalRetries = (metrics.totalRetries || 0) + 1;
       if (connection) {
         connection.retries++;
         if (connection.retries < MAX_CHUNK_RETRIES) {
@@ -561,13 +815,17 @@ export class TransferService extends EventEmitter {
 
     if (connection) {
       connection.retries = 0;
+      if (connection.timeout) clearTimeout(connection.timeout);
       this.connections.delete(connectionKey);
     }
     this.recordChunkAck(session, socket, message.chunkIndex);
     const inFlightChunks: Set<number> = (session as any).inFlightChunks || new Set<number>();
     inFlightChunks.delete(message.chunkIndex);
-    session.acknowledgedChunks.add(message.chunkIndex);
-    session.lastAcknowledgedByte = message.acknowledgedByte;
+    const resumeState = this.getFileResumeState(session, message.fileId);
+    resumeState.acknowledgedChunks.add(message.chunkIndex);
+    resumeState.contiguousBytes = this.updateContiguousBytes(session, message.fileId);
+    session.acknowledgedChunks = resumeState.acknowledgedChunks;
+    session.lastAcknowledgedByte = resumeState.contiguousBytes;
 
     this.updateProgress(session);
     await this.fillSendWindow(session, socket);
@@ -582,25 +840,31 @@ export class TransferService extends EventEmitter {
     if (!fileInfo) return;
 
     const key = `${session.id}:${fileId}`;
-    const writeStream = this.writeStreams.get(key);
-    if (writeStream) {
-      await new Promise<void>((resolve) => {
-        writeStream.end(() => {
-          this.writeStreams.delete(key);
-          resolve();
-        });
-      });
+    const writeHandle = this.writeHandles.get(key);
+    if (writeHandle) {
+      // Flush the write queue before syncing so all buffered writes land on disk.
+      const queueKey = key;
+      await (this.writeQueues.get(queueKey) ?? Promise.resolve());
+      this.writeQueues.delete(queueKey);
+      await writeHandle.sync();
+      await writeHandle.close();
+      this.writeHandles.delete(key);
     }
 
-    (session as any).fileProgress = (session as any).fileProgress || {};
-    (session as any).fileProgress[fileId] = {
-      transferred: fileInfo.size,
-      completed: true,
-    };
-
     const filePath = (session as any).filePaths?.[fileId];
-    if (filePath) {
-      const isValid = await this.fileService.verifyFileChecksum(filePath, checksum);
+    let verifiedPath = filePath;
+    if (!verifiedPath) {
+      const handle = await this.createWriteHandle(session, fileId);
+      if (handle) {
+        await handle.sync();
+        await handle.close();
+      }
+      this.writeHandles.delete(key);
+      verifiedPath = (session as any).filePaths?.[fileId];
+    }
+    
+    if (verifiedPath && !fileInfo.isDirectory) {
+      const isValid = await this.fileService.verifyFileChecksum(verifiedPath, checksum);
       if (!isValid) {
         log.error(`File ${fileId} checksum mismatch after transfer`);
         session.status = 'failed';
@@ -609,6 +873,26 @@ export class TransferService extends EventEmitter {
         return;
       }
     }
+
+    if (verifiedPath) {
+      try {
+        if (fileInfo.mtime || fileInfo.ctime) {
+          const atime = Date.now() / 1000;
+          const mtime = (fileInfo.mtime || Date.now()) / 1000;
+          await fs.promises.utimes(verifiedPath, atime, mtime);
+        }
+      } catch (err) {
+        log.warn(`Failed to restore timestamps for ${verifiedPath}:`, err);
+      }
+    }
+
+    const resumeState = this.getFileResumeState(session, fileId);
+    resumeState.completed = true;
+    (session as any).fileProgress = (session as any).fileProgress || {};
+    (session as any).fileProgress[fileId] = {
+      transferred: fileInfo.size,
+      completed: true,
+    };
 
     log.info(`File ${fileInfo.name} transferred and verified successfully`);
 
@@ -622,21 +906,50 @@ export class TransferService extends EventEmitter {
       this.emit('session-completed', session);
     }
 
+    this.sendMessage(socket, {
+      type: 'complete-ack',
+      sessionId: session.id,
+      fileId,
+      checksum,
+      valid: true,
+    });
+
     this.emitSessionUpdate(session);
   }
 
   private async handleResume(socket: net.Socket, message: any): Promise<void> {
     const session = this.sessions.get(message.sessionId);
-    if (!session) return;
+    if (!session) {
+      const pending = this.pendingIncomingTransfers.get(message.sessionId);
+      if (pending) {
+        this.pendingTransfers.set(message.sessionId, { transfer: pending, socket });
+        this.emit('incoming-transfer', pending);
+        log.info(`Reattached persisted pending transfer ${message.sessionId}`);
+      }
+      return;
+    }
 
     if (session.direction === 'receiving') {
+      const fileId = message.fileId || this.getCurrentFileId(session) || session.files[0]?.id;
+      const resumeState = fileId
+        ? this.getFileResumeState(session, fileId)
+        : { acknowledgedChunks: new Set<number>(), contiguousBytes: 0, completed: false };
+      if (fileId) {
+        session.lastAcknowledgedByte = resumeState.contiguousBytes;
+        session.acknowledgedChunks = resumeState.acknowledgedChunks;
+      }
       session.status = 'transferring';
       this.emitSessionUpdate(session);
       this.sendMessage(socket, {
         type: 'resume-ack',
         sessionId: session.id,
-        lastAcknowledgedByte: session.lastAcknowledgedByte,
-        lastAcknowledgedChunk: Math.max(...Array.from(session.acknowledgedChunks), -1),
+        fileId,
+        fileIndex: fileId ? session.files.findIndex(file => file.id === fileId) : 0,
+        lastAcknowledgedByte: resumeState.contiguousBytes,
+        lastAcknowledgedChunk: fileId ? this.getContiguousChunkIndex(session, fileId) : -1,
+        completedFiles: session.files
+          .filter(file => this.getFileResumeState(session, file.id).completed)
+          .map(file => file.id),
       });
       return;
     }
@@ -653,19 +966,97 @@ export class TransferService extends EventEmitter {
     await this.startSendingChunks(session, socket, true);
   }
 
+  private async handleCompleteAck(socket: net.Socket, message: any): Promise<void> {
+    const session = this.sessions.get(message.sessionId);
+    if (!session || session.direction !== 'sending') return;
+
+    const key = `${session.id}:${message.fileId}`;
+    if (!this.awaitingComplete.delete(key)) return;
+    if (!message.valid) {
+      session.status = 'failed';
+      session.error = `Receiver rejected the checksum for ${message.fileId}`;
+      this.emit('session-error', session.id, session.error);
+      return;
+    }
+
+    const resumeState = this.getFileResumeState(session, message.fileId);
+    resumeState.completed = true;
+    (session as any).fileProgress = (session as any).fileProgress || {};
+    const file = session.files.find(item => item.id === message.fileId);
+    if (file) {
+      (session as any).fileProgress[message.fileId] = {
+        transferred: file.size,
+        completed: true,
+      };
+    }
+
+    const currentFileIndex = (session as any).currentFileIndex || 0;
+    const nextFileIndex = currentFileIndex + 1;
+    (session as any).currentFileIndex = nextFileIndex;
+    if (nextFileIndex < session.files.length) {
+      await this.startSendingChunks(session, socket);
+      return;
+    }
+
+    session.status = 'completed';
+    session.completedAt = Date.now();
+    this.persistSessionsSoon();
+    this.emit('session-completed', session);
+  }
+
   private async handleResumeAck(socket: net.Socket, message: any): Promise<void> {
     const session = this.sessions.get(message.sessionId);
     if (!session) return;
 
-    session.lastAcknowledgedByte = message.lastAcknowledgedByte;
-    session.acknowledgedChunks.clear();
+    const reconnectState = this.reconnects.get(session.id);
+    if (reconnectState) {
+      reconnectState.inFlight = false;
+      reconnectState.attempts = 0;
+      if (reconnectState.timer) clearTimeout(reconnectState.timer);
+      reconnectState.timer = null;
+    }
+
+    const completedFiles = new Set<string>(message.completedFiles || []);
+    (session as any).fileProgress = (session as any).fileProgress || {};
+    for (const fileId of completedFiles) {
+      const file = session.files.find(item => item.id === fileId);
+      if (file) {
+        this.awaitingComplete.delete(`${session.id}:${fileId}`);
+        this.getFileResumeState(session, fileId).completed = true;
+        (session as any).fileProgress[fileId] = { transferred: file.size, completed: true };
+      }
+    }
+
+    const fileIndex = Number.isInteger(message.fileIndex)
+      ? message.fileIndex
+      : (session as any).currentFileIndex || 0;
+    (session as any).currentFileIndex = fileIndex;
+    const fileId = message.fileId || session.files[fileIndex]?.id;
+    const resumeState = fileId ? this.getFileResumeState(session, fileId) : null;
+    session.lastAcknowledgedByte = message.lastAcknowledgedByte || resumeState?.contiguousBytes || 0;
+    if (resumeState) {
+      resumeState.acknowledgedChunks.clear();
+      resumeState.contiguousBytes = session.lastAcknowledgedByte;
+    }
+    session.acknowledgedChunks = resumeState?.acknowledgedChunks || new Set<number>();
     for (let i = 0; i <= message.lastAcknowledgedChunk; i++) {
       session.acknowledgedChunks.add(i);
     }
 
     session.status = 'transferring';
+    session.error = undefined;
     this.emitSessionUpdate(session);
     log.info(`Resume acknowledged for session ${session.id} at chunk ${message.lastAcknowledgedChunk}`);
+    while ((session as any).currentFileIndex < session.files.length &&
+      this.getFileResumeState(session, session.files[(session as any).currentFileIndex].id).completed) {
+      (session as any).currentFileIndex++;
+    }
+    if ((session as any).currentFileIndex >= session.files.length) {
+      session.status = 'completed';
+      session.completedAt = Date.now();
+      this.emit('session-completed', session);
+      return;
+    }
     await this.startSendingChunks(session, socket, true);
   }
 
@@ -678,40 +1069,39 @@ export class TransferService extends EventEmitter {
     this.emit('session-error', session.id, message.error);
   }
 
-  private getWriteStream(sessionId: string, fileId: string): fs.WriteStream | null {
-    const key = `${sessionId}:${fileId}`;
-    return this.writeStreams.get(key) || null;
-  }
+  private async createWriteHandle(session: TransferSession, fileId: string): Promise<fs.promises.FileHandle | null> {
+    const key = `${session.id}:${fileId}`;
+    const existingHandle = this.writeHandles.get(key);
+    if (existingHandle) return existingHandle;
 
-  private async createWriteStream(
-    session: TransferSession,
-    fileId: string,
-    offset = 0,
-  ): Promise<fs.WriteStream | null> {
-    const fileInfo = session.files.find(f => f.id === fileId);
-    if (!fileInfo) return null;
+    const fileInfo = session.files.find(file => file.id === fileId);
+    if (!fileInfo) throw new Error(`Unknown file ${fileId}`);
 
     const downloadPath = (session as any).downloadPath || '';
     const persistedPath = (session as any).filePaths?.[fileId];
     const isResume = Boolean(persistedPath && fs.existsSync(persistedPath));
-    let filePath = persistedPath || path.join(downloadPath, fileInfo.name);
-    if (!isResume) {
+    const sanitizedName = sanitizeRelativePath(fileInfo.name);
+    let filePath = persistedPath || path.join(downloadPath, sanitizedName);
+    
+    // Only get unique file path if it's not a resume and not a directory
+    if (!isResume && !fileInfo.isDirectory) {
       filePath = await this.fileService.getUniqueFilePath(filePath);
     }
+
+    await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+
     (session as any).filePaths = (session as any).filePaths || {};
     (session as any).filePaths[fileId] = filePath;
 
-    await this.fileService.ensureDir(downloadPath);
+    if (fileInfo.isDirectory) {
+      await fs.promises.mkdir(filePath, { recursive: true });
+      return null;
+    }
 
-    const stream = this.fileService.createWriteStream(filePath, {
-      flags: isResume ? 'r+' : 'ax',
-      start: isResume ? offset : undefined,
-    });
-    const key = `${session.id}:${fileId}`;
-    this.writeStreams.set(key, stream);
-
-    log.info(`Created write stream for ${fileInfo.name} -> ${filePath}`);
-    return stream;
+    const handle = await fs.promises.open(filePath, isResume ? 'r+' : 'w+');
+    this.writeHandles.set(key, handle);
+    log.info(`Created random-access write handle for ${fileInfo.name} -> ${filePath}`);
+    return handle;
   }
 
   private initializeTransferMetrics(session: TransferSession, resetWindow: boolean): void {
@@ -746,6 +1136,7 @@ export class TransferService extends EventEmitter {
       metrics.chunkSentAt.delete(chunkIndex);
 
       const queuedBytes = socket.writableLength;
+      metrics.socketWritableLength = queuedBytes;
       const rttCongested = metrics.minRttMs > 0 && metrics.rttMs > metrics.minRttMs * 2;
       const queueCongested = queuedBytes > 16 * 1024 * 1024;
       if (rttCongested || queueCongested) {
@@ -834,6 +1225,7 @@ export class TransferService extends EventEmitter {
     }
 
     log.info(`Starting to send ${fileInfo.name} (${fileInfo.size} bytes, ${chunks.length} chunks)`);
+    this.prefetchChunks(session);
     await this.fillSendWindow(session, socket);
   }
 
@@ -854,6 +1246,44 @@ export class TransferService extends EventEmitter {
     }
   }
 
+  private consumeBandwidth(bytes: number): Promise<void> {
+    const run = async () => {
+      const limit = this.bandwidthLimitBytesPerSecond;
+      if (!limit || bytes <= 0) return;
+      const delay = (bytes / limit) * 1000;
+      await new Promise<void>(resolve => setTimeout(resolve, delay));
+    };
+    const next = this.bandwidthTail.then(run, run);
+    this.bandwidthTail = next.catch(() => {});
+    return next;
+  }
+
+  private readChunkAhead(fileInfo: FileInfo, chunk: { index: number; offset: number; size: number }): Promise<Buffer | null> {
+    const key = `${fileInfo.id}:${chunk.index}`;
+    const existing = this.chunkReadAhead.get(key);
+    if (existing) return existing;
+
+    const pending = this.readChunkData(fileInfo.path, chunk.offset, chunk.size);
+    this.chunkReadAhead.set(key, pending);
+    void pending.catch(() => {
+      if (this.chunkReadAhead.get(key) === pending) this.chunkReadAhead.delete(key);
+    });
+    return pending;
+  }
+
+  private prefetchChunks(session: TransferSession): void {
+    const currentFileIndex = (session as any).currentFileIndex || 0;
+    const fileInfo = session.files[currentFileIndex];
+    if (!fileInfo) return;
+
+    const inFlightChunks: Set<number> = (session as any).inFlightChunks || new Set<number>();
+    const readAheadLimit = Math.max(8, ((session as any).windowSize || TRANSFER_WINDOW_SIZE) * 2);
+    const candidates = session.chunks
+      .filter(chunk => !session.acknowledgedChunks.has(chunk.index) && !inFlightChunks.has(chunk.index))
+      .slice(0, readAheadLimit);
+    for (const chunk of candidates) this.readChunkAhead(fileInfo, chunk);
+  }
+
   private async fillSendWindow(session: TransferSession, socket: net.Socket): Promise<void> {
     const inFlightChunks: Set<number> = (session as any).inFlightChunks || new Set<number>();
     (session as any).inFlightChunks = inFlightChunks;
@@ -866,6 +1296,7 @@ export class TransferService extends EventEmitter {
     ) {
       const previousInFlight = inFlightChunks.size;
       await this.sendNextChunk(session, socket);
+      this.prefetchChunks(session);
       if (inFlightChunks.size === previousInFlight) break;
     }
   }
@@ -885,7 +1316,11 @@ export class TransferService extends EventEmitter {
 
       if (!fileInfo) return;
 
+      const completionKey = `${session.id}:${fileInfo.id}`;
+      if (this.awaitingComplete.has(completionKey)) return;
+
       const fileChecksum = await this.fileService.calculateFileChecksum(fileInfo.path);
+      this.awaitingComplete.add(completionKey);
       this.sendMessage(socket, {
         type: 'complete',
         sessionId: session.id,
@@ -893,19 +1328,7 @@ export class TransferService extends EventEmitter {
         checksum: fileChecksum,
       });
 
-      (session as any).fileProgress[fileInfo.id].completed = true;
-
-      const nextFileIndex = currentFileIndex + 1;
-      if (nextFileIndex < session.files.length) {
-        (session as any).currentFileIndex = nextFileIndex;
-        log.info(`Moving to next file: ${session.files[nextFileIndex].name}`);
-        await this.startSendingChunks(session, socket);
-      } else {
-        session.status = 'completed';
-        session.completedAt = Date.now();
-        this.persistSessionsSoon();
-        this.emit('session-completed', session);
-      }
+      this.emitSessionUpdate(session);
       return;
     }
 
@@ -913,7 +1336,8 @@ export class TransferService extends EventEmitter {
     const fileInfo = session.files[currentFileIndex];
     if (!fileInfo) return;
 
-    const chunkData = await this.readChunkData(fileInfo.path, unacknowledged.offset, unacknowledged.size);
+    const chunkData = await this.readChunkAhead(fileInfo, unacknowledged);
+    this.chunkReadAhead.delete(`${fileInfo.id}:${unacknowledged.index}`);
     if (!chunkData) {
       session.status = 'failed';
       session.error = `Failed to read chunk ${unacknowledged.index}`;
@@ -921,10 +1345,31 @@ export class TransferService extends EventEmitter {
       return;
     }
 
+    const metrics = session as any;
+    const readStartedAt = Date.now();
+    metrics.readBytes = (metrics.readBytes || 0) + chunkData.length;
+    metrics.readStartedAt = metrics.readStartedAt || readStartedAt;
+    metrics.readSpeed = metrics.readBytes / Math.max((Date.now() - metrics.readStartedAt) / 1000, 0.001);
+    const hashStartedAt = Date.now();
     const checksum = await this.fileService.calculateChunkChecksum(chunkData);
+    metrics.hashBytes = (metrics.hashBytes || 0) + chunkData.length;
+    metrics.hashStartedAt = metrics.hashStartedAt || hashStartedAt;
+    metrics.hashSpeed = metrics.hashBytes / Math.max((Date.now() - metrics.hashStartedAt) / 1000, 0.001);
+    let wireData = chunkData;
+    let compressed = false;
+    if (this.compressionEnabled && shouldCompress(fileInfo.name, chunkData.length)) {
+      const candidate = await deflateRawAsync(chunkData);
+      if (candidate.length < chunkData.length * 0.95) {
+        wireData = candidate;
+        compressed = true;
+        metrics.compressedBytes = (metrics.compressedBytes || 0) + candidate.length;
+        metrics.uncompressedBytes = (metrics.uncompressedBytes || 0) + chunkData.length;
+      }
+    }
+
+    await this.consumeBandwidth(chunkData.length);
 
     inFlightChunks.add(unacknowledged.index);
-    const metrics = session as any;
     metrics.chunkSentAt?.set(unacknowledged.index, Date.now());
 
     this.sendMessage(socket, {
@@ -933,18 +1378,22 @@ export class TransferService extends EventEmitter {
       fileId: fileInfo.id,
       chunkIndex: unacknowledged.index,
       offset: unacknowledged.offset,
-      data: chunkData,
+      data: wireData,
+      compressed,
+      uncompressedLength: chunkData.length,
       checksum,
     });
 
-    const connKey = `${socket.remoteAddress}:${socket.remotePort}:${unacknowledged.index}`;
-    this.connections.set(connKey, {
+    const connKey = `${socket.remoteAddress}:${socket.remotePort}:${fileInfo.id}:${unacknowledged.index}`;
+    const connection: ActiveConnection = {
       socket,
       sessionId: session.id,
       fileId: fileInfo.id,
       chunkIndex: unacknowledged.index,
       retries: 0,
-    });
+    };
+    this.connections.set(connKey, connection);
+    this.scheduleChunkTimeout(session, connKey, connection);
 
     session.transferredBytes += chunkData.length;
 
@@ -979,11 +1428,12 @@ export class TransferService extends EventEmitter {
   }
 
   private async resendChunk(session: TransferSession, connection: ActiveConnection): Promise<void> {
-    const currentFileIndex = (session as any).currentFileIndex || 0;
-    const fileInfo = session.files[currentFileIndex];
+    const fileInfo = session.files.find(file => file.id === connection.fileId);
     if (!fileInfo) return;
 
-    const chunk = session.chunks.find(c => c.index === connection.chunkIndex);
+    const chunk = this.fileService
+      .createChunks(fileInfo.size, fileInfo.id)
+      .find(c => c.index === connection.chunkIndex);
     if (!chunk) return;
 
     const chunkData = await this.readChunkData(fileInfo.path, chunk.offset, chunk.size);
@@ -1000,6 +1450,30 @@ export class TransferService extends EventEmitter {
       data: chunkData,
       checksum,
     });
+    const connectionKey = `${connection.socket.remoteAddress}:${connection.socket.remotePort}:${connection.fileId}:${connection.chunkIndex}`;
+    this.scheduleChunkTimeout(session, connectionKey, connection);
+  }
+
+  private scheduleChunkTimeout(
+    session: TransferSession,
+    connectionKey: string,
+    connection: ActiveConnection,
+  ): void {
+    if (connection.timeout) clearTimeout(connection.timeout);
+    const metrics = session as any;
+    const timeoutMs = Math.max(2000, Math.min(10000, (metrics.rttMs || 500) * 3));
+    connection.timeout = setTimeout(async () => {
+      if (this.connections.get(connectionKey) !== connection) return;
+      if (connection.retries >= MAX_CHUNK_RETRIES) {
+        session.status = 'reconnecting';
+        session.error = `Chunk ${connection.chunkIndex} timed out after ${MAX_CHUNK_RETRIES} retries`;
+        this.emitSessionUpdate(session);
+        this.scheduleReconnect(session, session.error);
+        return;
+      }
+      connection.retries++;
+      await this.resendChunk(session, connection);
+    }, timeoutMs);
   }
 
   private sendMessage(socket: tls.TLSSocket | net.Socket, message: any): void {
@@ -1014,13 +1488,19 @@ export class TransferService extends EventEmitter {
         : log.info.bind(log);
       messageLog(`[TRACE] SEND ${message.type} START session=${message.sessionId || 'unknown'} socket=${remoteAddr}`);
       const frame = encodeFrame(message);
-      socket.write(frame, (err) => {
+      // Socket Buffer Optimization: if the kernel write buffer is full, wait
+      // for 'drain' before writing. This prevents memory from piling up.
+      const ok = socket.write(frame, (err) => {
         if (err) {
           log.error(`[TRACE] SEND ${message.type} ERROR socket=${remoteAddr}:\n${errorDetails(err)}`);
           return;
         }
         messageLog(`[TRACE] SEND ${message.type} SUCCESS session=${message.sessionId || 'unknown'} socket=${remoteAddr} bytes=${frame.length}`);
       });
+      if (!ok) {
+        // Socket buffer is full — log for metrics but don't block (Node will buffer).
+        log.debug(`[TRACE] SEND ${message.type} BUFFERED socket=${remoteAddr} queued=${socket.writableLength}B`);
+      }
     } catch (err) {
       log.error(`[TRACE] SEND ${message.type} ERROR socket=${remoteAddr}:\n${errorDetails(err)}`);
     }
@@ -1056,7 +1536,7 @@ export class TransferService extends EventEmitter {
       id: sessionId,
       deviceId: device.id,
       deviceName: device.name,
-      deviceIp: device.ip,
+      deviceIp: device.addresses?.[0] || 'unknown',
       files,
       totalSize,
       transferredBytes: 0,
@@ -1072,6 +1552,8 @@ export class TransferService extends EventEmitter {
     };
 
     this.sessions.set(sessionId, session);
+    (session as any).devicePort = device.port;
+    (session as any).queuedAt = Date.now();
     this.persistSessionsSoon();
     log.info(`Created transfer session ${sessionId} with ${device.name}`);
 
@@ -1081,77 +1563,107 @@ export class TransferService extends EventEmitter {
         : TRANSFER_PORT;
 
       log.info(`[TRACE] ENTER createSession session=${sessionId} target=${device.name}`);
-      log.info(`[TRACE] DEVICE RESOLVED id=${device.id} ip=${device.ip}`);
+      log.info(`[TRACE] DEVICE RESOLVED id=${device.id} addresses=${(device as any).addresses?.join(', ') || 'unknown'}`);
       log.info(`[TRACE] PORT RESOLVED port=${port}`);
-      log.info(`[TRACE] OPEN SOCKET START ${device.ip}:${port}`);
 
-      const options: tls.ConnectionOptions = {
-        host: device.ip,
-        port,
-        rejectUnauthorized: false,
+      const addresses = (device as any).addresses || [];
+
+      const attemptConnection = (addressIndex: number) => {
+        if (addressIndex >= addresses.length) {
+          log.error(`[TRACE] ALL CONNECTION ATTEMPTS FAILED session=${sessionId}`);
+          session.status = 'failed';
+          session.error = 'Failed to connect to any available address';
+          this.emitSessionUpdate(session);
+          return;
+        }
+
+        const currentIp = addresses[addressIndex];
+        log.info(`[TRACE] OPEN SOCKET START ${currentIp}:${port} (Attempt ${addressIndex + 1}/${addresses.length})`);
+
+        const options: tls.ConnectionOptions = {
+          host: currentIp,
+          port,
+          rejectUnauthorized: false,
+        };
+
+        const socket = tls.connect(options);
+        socket.setKeepAlive(true, TCP_KEEPALIVE);
+
+        socket.on('connect', () => {
+          log.info(`[TRACE] TCP CONNECTED ${currentIp}:${port}`);
+        });
+
+        socket.on('secureConnect', () => {
+          socket.setTimeout(0);
+          log.info(`[TRACE] TLS CONNECTED ${currentIp}:${port}`);
+          session.status = 'connecting';
+          this.emitSessionUpdate(session);
+
+          log.info(`[TRACE] HELLO/METADATA START session=${sessionId}`);
+          this.sendMessage(socket, {
+            type: 'request',
+            sessionId,
+            deviceId: this.localDeviceId || sessionId,
+            deviceName: this.localDeviceName || 'Unknown Device',
+            files,
+            totalSize,
+          });
+          log.info(`[TRACE] HELLO/METADATA QUEUED session=${sessionId}`);
+        });
+
+        let handledError = false;
+
+        socket.setTimeout(5000, () => {
+          if (handledError) return;
+          handledError = true;
+          log.error(`[TRACE] CONNECT TIMEOUT ${currentIp}:${port}`);
+          socket.destroy();
+          attemptConnection(addressIndex + 1);
+        });
+
+        let buffer = Buffer.alloc(0);
+        socket.on('data', async (data) => {
+          buffer = Buffer.concat([buffer, data]);
+          while (buffer.length >= 4) {
+            const messageLength = buffer.readUInt32BE(0);
+            if (messageLength > MAX_TRANSFER_FRAME_SIZE) {
+              socket.destroy(new Error(`Transfer frame exceeds ${MAX_TRANSFER_FRAME_SIZE} bytes`));
+              return;
+            }
+            if (buffer.length < 4 + messageLength) break;
+            const messageData = buffer.slice(4, 4 + messageLength);
+            buffer = buffer.slice(4 + messageLength);
+            try {
+              const message = decodeFrame(messageData);
+              await this.handleMessage(socket, message);
+            } catch (err) {
+              log.error(`[TRACE] SENDER MESSAGE ERROR session=${sessionId}:\n${errorDetails(err)}`);
+              socket.destroy(err instanceof Error ? err : new Error(String(err)));
+            }
+          }
+        });
+
+        socket.on('error', (err) => {
+          if (handledError) return;
+          handledError = true;
+          const code = (err as NodeJS.ErrnoException).code;
+          log.error(`[TRACE] SOCKET ERROR ${currentIp}:${port}${code ? ` (${code})` : ''}:\n${errorDetails(err)}`);
+          socket.destroy();
+          attemptConnection(addressIndex + 1);
+        });
+
+        socket.on('close', (hadError) => {
+          log.info(`[TRACE] SOCKET CLOSE session=${sessionId} hadError=${hadError}`);
+          if (!['completed', 'cancelled', 'declined', 'failed', 'transferring'].includes(session.status)) {
+            if (!handledError) {
+              handledError = true;
+              attemptConnection(addressIndex + 1);
+            }
+          }
+        });
       };
 
-      const socket = tls.connect(options);
-
-      socket.on('connect', () => {
-        log.info(`[TRACE] TCP CONNECTED ${device.ip}:${port}`);
-      });
-
-      socket.on('secureConnect', () => {
-        socket.setTimeout(0);
-        log.info(`[TRACE] TLS CONNECTED ${device.ip}:${port}`);
-        session.status = 'connecting';
-        this.emitSessionUpdate(session);
-
-        log.info(`[TRACE] HELLO/METADATA START session=${sessionId}`);
-        this.sendMessage(socket, {
-          type: 'request',
-          sessionId,
-          deviceId: this.localDeviceId || sessionId,
-          deviceName: this.localDeviceName || 'Unknown Device',
-          files,
-          totalSize,
-        });
-        log.info(`[TRACE] HELLO/METADATA QUEUED session=${sessionId}`);
-      });
-
-      socket.setTimeout(10000, () => {
-        log.error(`[TRACE] CONNECT TIMEOUT ${device.ip}:${port}`);
-        const timeoutError = new Error(`Timed out connecting to ${device.ip}:${port}`);
-        socket.destroy(timeoutError);
-      });
-
-      let buffer = Buffer.alloc(0);
-      socket.on('data', async (data) => {
-        buffer = Buffer.concat([buffer, data]);
-        while (buffer.length >= 4) {
-          const messageLength = buffer.readUInt32BE(0);
-          if (buffer.length < 4 + messageLength) break;
-          const messageData = buffer.slice(4, 4 + messageLength);
-          buffer = buffer.slice(4 + messageLength);
-          try {
-            const message = decodeFrame(messageData);
-            await this.handleMessage(socket, message);
-          } catch (err) {
-            log.error(`[TRACE] SENDER MESSAGE ERROR session=${sessionId}:\n${errorDetails(err)}`);
-            socket.destroy(err instanceof Error ? err : new Error(String(err)));
-          }
-        }
-      });
-
-      socket.on('error', (err) => {
-        const code = (err as NodeJS.ErrnoException).code;
-        log.error(
-          `[TRACE] SOCKET ERROR ${device.ip}:${port}${code ? ` (${code})` : ''}:\n${errorDetails(err)}`,
-        );
-        session.status = 'failed';
-        session.error = err.message;
-        this.emit('session-error', session.id, err.message);
-      });
-
-      socket.on('close', (hadError) => {
-        log.info(`[TRACE] SOCKET CLOSE session=${sessionId} hadError=${hadError}`);
-      });
+      attemptConnection(0);
 
       log.info(`[TRACE] EXIT createSession session=${sessionId} socket-opening`);
     }
@@ -1218,6 +1730,7 @@ export class TransferService extends EventEmitter {
 
     this.sessions.set(sessionId, session);
     this.pendingTransfers.delete(sessionId);
+    this.pendingIncomingTransfers.delete(sessionId);
     this.persistSessionsSoon();
 
     this.sendMessage(socket, {
@@ -1239,6 +1752,8 @@ export class TransferService extends EventEmitter {
         sessionId,
       });
       this.pendingTransfers.delete(sessionId);
+      this.pendingIncomingTransfers.delete(sessionId);
+      this.persistSessionsSoon();
       log.info(`[REJECT_SESSION] Sent 'reject' message to sender and cleaned up.`);
     } else {
       log.warn(`[REJECT_SESSION] No pending transfer to reject for session ${sessionId} (already processed)`);
@@ -1251,11 +1766,18 @@ export class TransferService extends EventEmitter {
     if (!session) return;
 
     session.status = 'cancelled';
+    const reconnectState = this.reconnects.get(sessionId);
+    if (reconnectState?.timer) clearTimeout(reconnectState.timer);
+    this.reconnects.delete(sessionId);
+    this.awaitingComplete.forEach(key => {
+      if (key.startsWith(`${sessionId}:`)) this.awaitingComplete.delete(key);
+    });
+    this.clearSessionConnections(sessionId);
 
-    for (const [key, stream] of this.writeStreams) {
-      if (key.startsWith(sessionId)) {
-        stream.end();
-        this.writeStreams.delete(key);
+    for (const [key, handle] of this.writeHandles) {
+      if (key.startsWith(`${sessionId}:`)) {
+        await handle.close();
+        this.writeHandles.delete(key);
       }
     }
 
@@ -1276,32 +1798,86 @@ export class TransferService extends EventEmitter {
     const session = this.sessions.get(sessionId);
     if (!session) return;
 
-    session.status = 'reconnecting';
-    this.emitSessionUpdate(session);
-
     log.info(`Resuming transfer session ${sessionId}`);
+    this.scheduleReconnect(session, 'Resume requested');
   }
 
   getSessions(): TransferSession[] {
     return Array.from(this.sessions.values());
   }
 
+  getDiagnostics(): any[] {
+    return Array.from(this.sessions.values()).map(session => {
+      const internal = session as any;
+      let retries = 0;
+      for (const connection of this.connections.values()) {
+        if (connection.sessionId === session.id) retries += connection.retries;
+      }
+      const compressedBytes = internal.compressedBytes || 0;
+      const uncompressedBytes = internal.uncompressedBytes || 0;
+      return {
+        id: session.id,
+        deviceName: session.deviceName,
+        direction: session.direction,
+        status: session.status,
+        transferredBytes: session.transferredBytes,
+        totalSize: session.totalSize,
+        speed: session.speed,
+        rttMs: internal.rttMs || 0,
+        windowSize: internal.windowSize || TRANSFER_WINDOW_SIZE,
+        inFlightChunks: internal.inFlightChunks?.size || 0,
+        acknowledgedChunks: session.acknowledgedChunks.size,
+        retryCount: retries,
+        queuedBytes: internal.socketWritableLength || 0,
+        compressionRatio: uncompressedBytes > 0 ? compressedBytes / uncompressedBytes : 1,
+        compressedBytes,
+        uncompressedBytes,
+        startedAt: session.startedAt,
+        error: session.error,
+        speedHistory: session.speedHistory,
+      };
+    });
+  }
+
   getSession(sessionId: string): TransferSession | null {
     return this.sessions.get(sessionId) || null;
+  }
+
+  private scheduleReconnect(session: TransferSession, reason?: string): void {
+    if (this.stopping) return;
+    if (['completed', 'cancelled', 'declined', 'failed'].includes(session.status)) return;
+
+    const state = this.reconnects.get(session.id) || {
+      attempts: 0,
+      timer: null,
+      inFlight: false,
+    };
+    this.reconnects.set(session.id, state);
+    if (state.timer || state.inFlight) return;
+
+    session.status = 'reconnecting';
+    if (reason) session.error = reason;
+    this.clearSessionConnections(session.id);
+    this.emitSessionUpdate(session);
+
+    const delay = Math.min(30000, 1000 * Math.pow(2, Math.min(state.attempts, 5)));
+    state.timer = setTimeout(() => {
+      state.timer = null;
+      void this.attemptReconnect(session);
+    }, delay);
   }
 
   handleNetworkChange(newIp?: string): void {
     const activeSessions = this.sessions.values();
 
     for (const session of activeSessions) {
-      if (session.status === 'transferring' || session.status === 'reconnecting') {
+      // The sender owns reconnect negotiation. The receiver keeps its durable
+      // state and answers the sender's resume request, avoiding two sockets
+      // racing to resume the same session.
+      if (session.direction === 'sending' &&
+        (session.status === 'transferring' || session.status === 'reconnecting')) {
         log.info(`Network changed, session ${session.id} will attempt to resume`);
-        session.status = 'reconnecting';
-        this.emitSessionUpdate(session);
-
-        setTimeout(() => {
-          this.attemptReconnect(session);
-        }, 1000);
+        this.scheduleReconnect(session, 'Network changed; waiting to reconnect');
       }
     }
   }
@@ -1309,24 +1885,40 @@ export class TransferService extends EventEmitter {
   private async attemptReconnect(session: TransferSession): Promise<void> {
     if (session.status !== 'reconnecting') return;
 
+    const reconnectState = this.reconnects.get(session.id) || {
+      attempts: 0,
+      timer: null,
+      inFlight: false,
+    };
+    if (reconnectState.inFlight) return;
+    reconnectState.inFlight = true;
+    this.reconnects.set(session.id, reconnectState);
+    reconnectState.attempts++;
+
     try {
       log.info(`Attempting to reconnect session ${session.id}`);
 
       const options: tls.ConnectionOptions = {
         host: session.deviceIp,
-        port: TRANSFER_PORT,
+        port: (session as any).devicePort || TRANSFER_PORT,
         rejectUnauthorized: false,
       };
 
-      const socket = tls.connect(options, () => {
+      const socket = tls.connect(options);
+      socket.setKeepAlive(true, TCP_KEEPALIVE);
+      socket.once('secureConnect', () => {
         log.info(`Reconnected for session ${session.id}`);
 
+        const fileIndex = (session as any).currentFileIndex || 0;
+        const fileId = session.files[fileIndex]?.id;
+        const resumeState = fileId ? this.getFileResumeState(session, fileId) : null;
         this.sendMessage(socket, {
           type: 'resume',
           sessionId: session.id,
-          fileId: session.files[0]?.id,
-          lastAcknowledgedByte: session.lastAcknowledgedByte,
-          lastAcknowledgedChunk: Math.max(...Array.from(session.acknowledgedChunks), -1),
+          fileId,
+          fileIndex,
+          lastAcknowledgedByte: resumeState?.contiguousBytes || session.lastAcknowledgedByte,
+          lastAcknowledgedChunk: fileId ? this.getContiguousChunkIndex(session, fileId) : -1,
         });
       });
 
@@ -1335,6 +1927,10 @@ export class TransferService extends EventEmitter {
         buffer = Buffer.concat([buffer, data]);
         while (buffer.length >= 4) {
           const messageLength = buffer.readUInt32BE(0);
+          if (messageLength > MAX_TRANSFER_FRAME_SIZE) {
+            socket.destroy(new Error(`Transfer frame exceeds ${MAX_TRANSFER_FRAME_SIZE} bytes`));
+            return;
+          }
           if (buffer.length < 4 + messageLength) break;
 
           const messageData = buffer.slice(4, 4 + messageLength);
@@ -1354,24 +1950,30 @@ export class TransferService extends EventEmitter {
 
       socket.on('error', (err) => {
         log.warn(`Reconnect attempt failed for session ${session.id}:`, err);
+        reconnectState.inFlight = false;
         if (session.status === 'reconnecting') {
-          setTimeout(() => {
-            this.attemptReconnect(session);
-          }, 3000);
+          this.scheduleReconnect(session, err.message);
+        }
+      });
+
+      socket.on('close', () => {
+        reconnectState.inFlight = false;
+        if (session.status === 'reconnecting') {
+          this.scheduleReconnect(session, 'Connection closed while resuming');
         }
       });
 
     } catch (err) {
       log.error(`Failed to initiate reconnect for session ${session.id}:`, err);
+      reconnectState.inFlight = false;
       if (session.status === 'reconnecting') {
-        setTimeout(() => {
-          this.attemptReconnect(session);
-        }, 3000);
+        this.scheduleReconnect(session, errorDetails(err));
       }
     }
   }
 
   async stop(): Promise<void> {
+    this.stopping = true;
     for (const session of this.sessions.values()) {
       if (['pending', 'connecting', 'transferring', 'paused'].includes(session.status)) {
         session.status = 'reconnecting';
@@ -1384,11 +1986,24 @@ export class TransferService extends EventEmitter {
     }
     this.persistSessionsNow();
 
-    for (const stream of this.writeStreams.values()) {
-      stream.end();
+    for (const session of this.sessions.values()) {
+      const reconnectState = this.reconnects.get(session.id);
+      if (reconnectState?.timer) clearTimeout(reconnectState.timer);
+      this.clearSessionConnections(session.id);
     }
+    this.reconnects.clear();
+    this.awaitingComplete.clear();
+    this.chunkReadAhead.clear();
 
-    this.writeStreams.clear();
+    for (const handle of this.writeHandles.values()) {
+      try {
+        await handle.sync();
+        await handle.close();
+      } catch (err) {
+        log.warn('Failed to close write handle:', err);
+      }
+    }
+    this.writeHandles.clear();
 
     for (const [filePath, handle] of this.fileHandles) {
       try {

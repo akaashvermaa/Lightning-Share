@@ -4,20 +4,71 @@ import SpeedGraph, { formatSpeed } from '../components/SpeedGraph';
 
 export default function TransfersPage() {
   const { sessions } = useTransferStore();
+  const [query, setQuery] = useState('');
+  const [filter, setFilter] = useState<'all' | 'active' | 'completed' | 'failed'>('all');
 
-  const completedSessions = sessions.filter(s => s.status === 'completed');
-  const failedSessions = sessions.filter(s => s.status === 'failed' || s.status === 'declined' || s.status === 'cancelled');
-  const activeSessions = sessions.filter(
+  const filteredSessions = sessions.filter((session) => {
+    const haystack = `${session.deviceName} ${session.files.map(file => file.name).join(' ')}`.toLowerCase();
+    const matchesQuery = !query.trim() || haystack.includes(query.trim().toLowerCase());
+    const matchesFilter = filter === 'all'
+      || filter === 'active' && !['completed', 'cancelled', 'declined', 'failed'].includes(session.status)
+      || filter === 'completed' && session.status === 'completed'
+      || filter === 'failed' && ['failed', 'declined', 'cancelled'].includes(session.status);
+    return matchesQuery && matchesFilter;
+  });
+
+  const completedSessions = filteredSessions.filter(s => s.status === 'completed');
+  const failedSessions = filteredSessions.filter(s => s.status === 'failed' || s.status === 'declined' || s.status === 'cancelled');
+  const activeSessions = filteredSessions.filter(
     s => s.status !== 'completed' && s.status !== 'cancelled' && s.status !== 'declined' && s.status !== 'failed'
   );
 
   return (
     <div className="h-full flex flex-col">
-      <header className="bg-white border-b border-slate-200 px-8 py-4">
-        <h2 className="text-2xl font-semibold text-slate-900">Transfers</h2>
+      <header className="bg-white border-b border-slate-200 px-4 sm:px-8 py-4">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <h2 className="text-2xl font-semibold text-slate-900">Transfers</h2>
+            <p className="text-sm text-slate-500 mt-1">Track progress and revisit everything shared on this device.</p>
+          </div>
+          <div className="hidden sm:flex items-center gap-3">
+            <span className="text-sm text-slate-400">{sessions.length} total</span>
+            <button onClick={() => exportHistory(sessions)} className="px-3 py-2 text-sm font-medium text-slate-600 border border-slate-200 rounded-lg hover:bg-slate-50">Export</button>
+          </div>
+        </div>
       </header>
 
-      <div className="flex-1 overflow-auto p-8">
+      <div className="flex-1 overflow-auto p-4 sm:p-8">
+        {sessions.length > 0 && (
+          <div className="mb-6 flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between">
+            <label className="relative flex-1 max-w-md">
+              <span className="sr-only">Search transfers</span>
+              <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="11" cy="11" r="8" />
+                <line x1="21" y1="21" x2="16.65" y2="16.65" />
+              </svg>
+              <input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="Search files or devices"
+                className="w-full pl-9 pr-3 py-2.5 bg-white border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+              />
+            </label>
+            <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg overflow-x-auto" role="tablist" aria-label="Filter transfers">
+              {(['all', 'active', 'completed', 'failed'] as const).map((option) => (
+                <button
+                  key={option}
+                  onClick={() => setFilter(option)}
+                  role="tab"
+                  aria-selected={filter === option}
+                  className={`px-3 py-1.5 rounded-md text-xs font-medium whitespace-nowrap transition-colors ${filter === option ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                >
+                  {option[0].toUpperCase() + option.slice(1)}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         {activeSessions.length === 0 && completedSessions.length === 0 && failedSessions.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-center">
             <div className="w-24 h-24 bg-slate-100 rounded-full flex items-center justify-center mb-6">
@@ -30,7 +81,7 @@ export default function TransfersPage() {
             </div>
             <h3 className="text-lg font-medium text-slate-900 mb-2">No transfers yet</h3>
             <p className="text-slate-500 max-w-sm">
-              Your file transfers will appear here. Send files from the Home page to get started.
+              {sessions.length === 0 ? 'Your file transfers will appear here. Send files from the Home page to get started.' : 'No transfers match your search or filter.'}
             </p>
           </div>
         ) : (
@@ -95,8 +146,9 @@ const STATUS_CONFIG: Record<string, { label: string; color: string; dotClass: st
 
 
 function TransferCard({ session }: { session: any }) {
-  const { cancelTransfer, pauseTransfer, resumeTransfer } = useTransferStore();
+  const { cancelTransfer, pauseTransfer, resumeTransfer, retryTransfer } = useTransferStore();
   const [expanded, setExpanded] = useState(false);
+  const [isRetrying, setIsRetrying] = useState(false);
 
   const progress = session.totalSize > 0 ? (session.transferredBytes / session.totalSize) * 100 : 0;
   const isActive = session.status === 'transferring';
@@ -111,8 +163,17 @@ function TransferCard({ session }: { session: any }) {
     await window.lightningshare.showFileInFolder(filePath);
   };
 
+  const handleRetry = async () => {
+    setIsRetrying(true);
+    try {
+      await retryTransfer(session.id);
+    } finally {
+      setIsRetrying(false);
+    }
+  };
+
   return (
-    <div className={`bg-white rounded-lg border p-4 transition-all ${
+    <div className={`bg-white rounded-xl border p-4 sm:p-5 transition-all shadow-sm ${
       isFailed ? 'border-red-200' : isCompleted ? 'border-green-200' : 'border-slate-200'
     }`}>
       <div className="flex items-start justify-between mb-3">
@@ -139,8 +200,11 @@ function TransferCard({ session }: { session: any }) {
               {statusConfig.label}
             </span>
           </div>
-          <h4 className="font-medium text-slate-900 truncate mt-1.5 cursor-pointer hover:text-primary-600"
-              onClick={() => setExpanded(!expanded)}>
+          <button
+            className="font-medium text-slate-900 truncate mt-1.5 cursor-pointer hover:text-primary-600 text-left max-w-full"
+            onClick={() => setExpanded(!expanded)}
+            aria-expanded={expanded}
+          >
             {session.files.map((f: any) => f.name).join(', ')}
             {session.files.length > 1 && (
               <span className="text-slate-400 font-normal ml-1">({session.files.length} files)</span>
@@ -148,7 +212,7 @@ function TransferCard({ session }: { session: any }) {
             <svg className={`w-4 h-4 inline ml-1 transition-transform ${expanded ? 'rotate-180' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <polyline points="6 9 12 15 18 9" />
             </svg>
-          </h4>
+          </button>
           <p className="text-sm text-slate-500 mt-0.5">
             {isSending ? 'To' : 'From'} <span className="font-medium text-slate-600">{session.deviceName}</span>
             {' · '}
@@ -205,6 +269,15 @@ function TransferCard({ session }: { session: any }) {
               <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
               </svg>
+            </button>
+          )}
+          {isFailed && isSending && (
+            <button
+              onClick={() => void handleRetry()}
+              disabled={isRetrying}
+              className="px-2.5 py-1.5 text-xs font-medium text-primary-600 bg-primary-50 hover:bg-primary-100 rounded-lg disabled:opacity-50"
+            >
+              {isRetrying ? 'Retrying...' : 'Retry'}
             </button>
           )}
         </div>
@@ -336,4 +409,17 @@ function formatTime(seconds: number): string {
   if (seconds < 60) return `${Math.round(seconds)}s`;
   if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
   return `${Math.round(seconds / 3600)}h ${Math.round((seconds % 3600) / 60)}m`;
+}
+
+function exportHistory(sessions: any[]): void {
+  const payload = JSON.stringify(sessions, (_key, value) => {
+    if (value instanceof Set) return Array.from(value);
+    return value;
+  }, 2);
+  const url = URL.createObjectURL(new Blob([payload], { type: 'application/json' }));
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = `lightningshare-transfers-${new Date().toISOString().slice(0, 10)}.json`;
+  anchor.click();
+  URL.revokeObjectURL(url);
 }

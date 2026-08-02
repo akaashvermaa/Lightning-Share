@@ -132,7 +132,7 @@ export default function IncomingTransferToast({ transfer }: IncomingTransferToas
   const isError = state === 'error';
 
   return (
-    <div className="fixed bottom-4 right-4 w-[420px] bg-white rounded-xl shadow-2xl border border-slate-200 overflow-hidden z-50 animate-slide-in">
+    <div className="fixed bottom-4 right-4 w-[420px] max-w-[calc(100vw-2rem)] max-h-[calc(100vh-2rem)] overflow-auto bg-white rounded-xl shadow-2xl border border-slate-200 z-50 animate-slide-in">
       <div className={`h-1 ${
         isAccepted ? 'bg-green-500' : isRejected ? 'bg-red-500' : isPicking ? 'bg-amber-400' : isError ? 'bg-red-400' : 'bg-blue-500'
       }`} />

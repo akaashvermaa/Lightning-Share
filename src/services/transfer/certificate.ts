@@ -21,6 +21,15 @@ export class CertificateManager {
     this.ensureDir();
   }
 
+  getDiagnostics(): any {
+    return {
+      certPath: this.certInfo?.certPath || null,
+      keyPath: this.certInfo?.keyPath || null,
+      createdAt: this.certInfo?.createdAt || null,
+      isLoaded: !!this.certInfo,
+    };
+  }
+
   private ensureDir(): void {
     if (!fs.existsSync(this.certDir)) {
       fs.mkdirSync(this.certDir, { recursive: true });

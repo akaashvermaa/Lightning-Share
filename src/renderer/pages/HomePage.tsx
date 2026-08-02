@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { useTransferStore } from '../stores/transferStore';
 import DeviceCard from '../components/DeviceCard';
@@ -13,6 +14,7 @@ export default function HomePage() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [serverInfo, setServerInfo] = useState<any>(null);
   const [copied, setCopied] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
 
   // Detect if the user is accessing this server from a different device's browser.
   // In that case they can't send/receive files because they have no local transfer server.
@@ -49,6 +51,20 @@ export default function HomePage() {
     }
   }, [serverInfo]);
 
+  const handleRefresh = useCallback(async () => {
+    setIsRefreshing(true);
+    try {
+      const [nextDevices, nextServerInfo] = await Promise.all([
+        window.lightningshare.getDevices(),
+        window.lightningshare.getServerInfo(),
+      ]);
+      useAppStore.getState().setDevices(nextDevices);
+      setServerInfo(nextServerInfo);
+    } finally {
+      setIsRefreshing(false);
+    }
+  }, []);
+
   const activeTransfers = sessions.filter(
     s => s.status === 'transferring' || s.status === 'paused' || s.status === 'reconnecting' || s.status === 'connecting' || s.status === 'pending'
   );
@@ -59,26 +75,42 @@ export default function HomePage() {
 
   return (
     <div className="h-full flex flex-col">
-      <header className="bg-white border-b border-slate-200 px-8 py-4">
-        <div className="flex items-center justify-between">
+      <header className="bg-white border-b border-slate-200 px-4 sm:px-8 py-4">
+        <div className="flex items-center justify-between gap-4">
           <div>
-            <h2 className="text-2xl font-semibold text-slate-900">Nearby Devices</h2>
+            <div className="flex items-center gap-2">
+              <h2 className="text-2xl font-semibold text-slate-900">Nearby Devices</h2>
+              <span className="px-2 py-0.5 rounded-full bg-slate-100 text-xs font-semibold text-slate-500">{devices.length}</span>
+            </div>
             <p className="text-sm text-slate-500 mt-1">
               Your IP: <span className="font-mono text-slate-600">{localIp || serverInfo?.localIp}</span>
             </p>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 sm:gap-3">
+            <button
+              onClick={handleRefresh}
+              disabled={isRefreshing}
+              className="p-2 text-slate-400 hover:text-primary-600 hover:bg-primary-50 rounded-lg transition-colors disabled:opacity-50"
+              title="Refresh nearby devices"
+              aria-label="Refresh nearby devices"
+            >
+              <svg className={`w-5 h-5 ${isRefreshing ? 'animate-spin' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 13a8.1 8.1 0 0 0 15.5 2" />
+                <polyline points="16 3 20 3 20 7" />
+                <polyline points="8 21 4 21 4 17" />
+              </svg>
+            </button>
             {serverInfo && (
               <button
                 onClick={handleCopyUrl}
-                className="flex items-center gap-2 px-3 py-1.5 bg-blue-50 text-blue-600 rounded-full text-sm hover:bg-blue-100 transition-colors"
+                className="hidden sm:flex items-center gap-2 max-w-[220px] px-3 py-1.5 bg-blue-50 text-blue-600 rounded-full text-sm hover:bg-blue-100 transition-colors"
                 title="Click to copy server URL"
               >
                 <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                   <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
                   <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
                 </svg>
-                {copied ? 'Copied!' : serverInfo.url}
+                <span className="truncate">{copied ? 'Copied!' : serverInfo.url}</span>
               </button>
             )}
             <span className="flex items-center gap-2 px-3 py-1.5 bg-green-50 text-green-600 rounded-full text-sm">
@@ -90,7 +122,7 @@ export default function HomePage() {
       </header>
 
       {serverInfo && (
-        <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border-b border-blue-100 px-8 py-3">
+        <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border-b border-blue-100 px-4 sm:px-8 py-3">
           <div className="flex items-center justify-between flex-wrap gap-2">
             <div className="flex items-center gap-3">
               <div className="w-9 h-9 bg-blue-500 rounded-lg flex items-center justify-center flex-shrink-0">
@@ -155,9 +187,9 @@ export default function HomePage() {
         </div>
       )}
 
-      <div className="flex-1 overflow-auto p-8">
+      <div className="flex-1 overflow-auto p-4 sm:p-8">
         {devices.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full text-center">
+          <div className="flex flex-col items-center justify-center min-h-[420px] h-full text-center">
             <div className="w-24 h-24 bg-slate-100 rounded-full flex items-center justify-center mb-6">
               <svg className="w-12 h-12 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
                 <rect x="2" y="2" width="20" height="8" rx="2" ry="2" />
@@ -180,15 +212,23 @@ export default function HomePage() {
             </div>
           </div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {devices.map(device => (
-              <DeviceCard
-                key={device.id}
-                device={device}
-                onSend={() => handleSendFiles(device.id)}
-                disabled={isRemoteBrowser}
-              />
-            ))}
+          <div>
+            <div className="flex items-center justify-between mb-4">
+              <p className="text-sm text-slate-500">Select a device to start a private transfer.</p>
+              <span className="text-xs font-medium text-green-600 flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-green-500" /> Network ready
+              </span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {devices.map(device => (
+                <DeviceCard
+                  key={device.id}
+                  device={device}
+                  onSend={() => handleSendFiles(device.id)}
+                  disabled={isRemoteBrowser}
+                />
+              ))}
+            </div>
           </div>
         )}
       </div>
@@ -205,9 +245,12 @@ export default function HomePage() {
               </svg>
               Transfer Activity
             </h3>
-            <span className="text-xs text-slate-400">
-              {activeTransfers.length} active · {recentCompleted.length} completed · {failedTransfers.length} failed
-            </span>
+            <div className="flex items-center gap-3">
+              <Link to="/transfers" className="text-xs font-medium text-primary-600 hover:text-primary-700">View all</Link>
+              <span className="text-xs text-slate-400">
+                {activeTransfers.length} active · {recentCompleted.length} completed · {failedTransfers.length} failed
+              </span>
+            </div>
           </div>
           <div className="space-y-2">
             {activeTransfers.map(session => (

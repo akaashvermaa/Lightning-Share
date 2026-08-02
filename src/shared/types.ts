@@ -1,20 +1,42 @@
+export interface DeviceCapabilities {
+  version: string;
+  protocolVersion: number;
+  tls: boolean;
+  compression: boolean;
+  chunkVersion: number;
+  os: string;
+  architecture: string;
+  appVersion: string;
+}
+
 export interface Device {
   id: string;
   name: string;
-  ip: string;
+  addresses: string[];
   port: number;
   lastSeen: number;
   isLocal: boolean;
+  rtt?: number;
+  discoveryMethods: ('udp4' | 'udp6' | 'mdns')[];
+  capabilities?: DeviceCapabilities;
+  publicKey?: string;
+  fingerprint?: string;
 }
 
 export interface FileInfo {
   id: string;
-  name: string;
-  path: string;
+  name: string; // The relative path, normalized with '/'
+  path: string; // The local temp/saved absolute path
   size: number;
   isDirectory: boolean;
   mimeType: string;
   checksum?: string;
+  mtime?: number;
+  ctime?: number;
+  permissions?: number;
+  hidden?: boolean;
+  readonly?: boolean;
+  fileRef?: any; // File or FileSystemDirectoryHandle on frontend
 }
 
 export interface ChunkInfo {
@@ -101,10 +123,11 @@ export interface DiscoveryMessage {
   deviceId: string;
   deviceName: string;
   port: number;
+  capabilities?: DeviceCapabilities;
 }
 
 export interface TransferMessage {
-  type: 'request' | 'accept' | 'reject' | 'manifest' | 'manifest-ack' | 'chunk' | 'ack' | 'complete' | 'error' | 'resume' | 'resume-ack';
+  type: 'request' | 'accept' | 'reject' | 'manifest' | 'manifest-ack' | 'chunk' | 'ack' | 'complete' | 'error' | 'resume' | 'resume-ack' | 'manifest-entry' | 'sync-request' | 'skip';
   sessionId: string;
   payload?: unknown;
 }
@@ -153,6 +176,7 @@ export interface AppSettings {
   trustedDevices: string[];
   compressionEnabled: boolean;
   theme: 'light' | 'dark' | 'system';
+  bandwidthLimit?: number;
 }
 
 export interface NetworkInfo {

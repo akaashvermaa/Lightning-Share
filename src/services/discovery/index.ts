@@ -2,36 +2,56 @@ import * as dgram from 'dgram';
 import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as net from 'net';
 import { v4 as uuidv4 } from 'uuid';
 import { EventEmitter } from 'events';
 import log from '../../shared/logger';
-import { DiscoveryMessage, Device } from '../../shared/types';
+import { DiscoveryMessage, Device, DeviceCapabilities } from '../../shared/types';
 import {
   DISCOVERY_PORT,
-  DISCOVERY_INTERVAL,
   DISCOVERY_TIMEOUT,
   TRANSFER_PORT,
 } from '../../shared/constants';
+import mdns from 'multicast-dns';
 
 const DATA_DIR = path.join(os.homedir(), '.lightningshare');
 const DEVICE_ID_FILE = path.join(DATA_DIR, 'device-id');
+const MDNS_SERVICE = '_lightningshare._tcp.local';
+const REFRESH_INTERVAL = 60000;
 
 export class DiscoveryService extends EventEmitter {
   private deviceId: string;
   private deviceName: string;
-  private socket: dgram.Socket | null = null;
-  private broadcaster: dgram.Socket | null = null;
+  private socket4: dgram.Socket | null = null;
+  private socket6: dgram.Socket | null = null;
+  private broadcaster4: dgram.Socket | null = null;
+  private broadcaster6: dgram.Socket | null = null;
+  private mdnsInstance: any = null;
   private devices: Map<string, Device> = new Map();
-  private intervalId: NodeJS.Timeout | null = null;
+  private refreshIntervalId: NodeJS.Timeout | null = null;
   private cleanupIntervalId: NodeJS.Timeout | null = null;
   private isRunning = false;
-  private localIp: string = '';
+  private localIps: string[] = [];
 
   constructor() {
     super();
     this.deviceId = this.loadOrCreateDeviceId();
     this.deviceName = os.hostname();
-    this.localIp = this.getLocalIp();
+    this.updateLocalIps();
+  }
+
+  getDiagnostics(): any {
+    return {
+      deviceId: this.deviceId,
+      deviceName: this.deviceName,
+      isRunning: this.isRunning,
+      knownDevices: this.devices.size,
+      interfaces: {
+        ipv4: !!this.socket4,
+        ipv6: !!this.socket6,
+        mdns: !!this.mdnsInstance,
+      },
+    };
   }
 
   private loadOrCreateDeviceId(): string {
@@ -55,97 +75,163 @@ export class DiscoveryService extends EventEmitter {
     return newId;
   }
 
-  private getLocalIp(): string {
+  private updateLocalIps(): void {
     const interfaces = os.networkInterfaces();
+    this.localIps = [];
     for (const name of Object.keys(interfaces)) {
       const netInterface = interfaces[name];
       if (!netInterface) continue;
       for (const info of netInterface) {
-        if (info.family === 'IPv4' && !info.internal) {
-          return info.address;
+        if (!info.internal) {
+          this.localIps.push(info.address);
         }
       }
     }
-    return '127.0.0.1';
+  }
+
+  private getCapabilities(): DeviceCapabilities {
+    return {
+      version: '1.0.0',
+      protocolVersion: 1,
+      tls: true,
+      compression: true,
+      chunkVersion: 1,
+      os: process.platform,
+      architecture: process.arch,
+      appVersion: '1.0.0'
+    };
   }
 
   async start(): Promise<void> {
     if (this.isRunning) return;
 
-    this.localIp = this.getLocalIp();
-    log.info(`Discovery starting on ${this.localIp}`);
+    this.updateLocalIps();
+    log.info(`Discovery starting with IPs: ${this.localIps.join(', ')}`);
 
-    this.socket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
-    this.broadcaster = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+    this.socket4 = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+    this.broadcaster4 = dgram.createSocket({ type: 'udp4', reuseAddr: true });
 
-    this.broadcaster.on('error', (err) => {
-      log.error('Broadcaster socket error:', err);
-    });
+    this.socket6 = dgram.createSocket({ type: 'udp6', reuseAddr: true });
+    this.broadcaster6 = dgram.createSocket({ type: 'udp6', reuseAddr: true });
 
-    await this.bindSocket();
-    this.broadcaster.bind(() => {
-      this.broadcaster?.setBroadcast(true);
-    });
-    this.startBroadcasting();
+    this.mdnsInstance = mdns();
+
+    this.broadcaster4.on('error', (err) => log.error('Broadcaster4 error:', err));
+    this.broadcaster6.on('error', (err) => log.error('Broadcaster6 error:', err));
+
+    await Promise.all([
+      this.bindSocket(this.socket4, 'udp4'),
+      this.bindSocket(this.socket6, 'udp6')
+    ]);
+
+    this.broadcaster4.bind(() => this.broadcaster4?.setBroadcast(true));
+    this.broadcaster6.bind(() => this.broadcaster6?.setBroadcast(true));
+
+    this.setupMdns();
+
+    this.refresh();
+
+    this.refreshIntervalId = setInterval(() => {
+      this.refresh();
+    }, REFRESH_INTERVAL);
+
     this.startCleanup();
 
     this.isRunning = true;
     log.info('Discovery service started');
   }
 
-  private async bindSocket(): Promise<void> {
-    return new Promise((resolve, reject) => {
-      if (!this.socket) return reject(new Error('Socket not initialized'));
-
-      this.socket.on('error', (err) => {
-        log.error('Discovery socket error:', err);
+  private async bindSocket(socket: dgram.Socket, type: 'udp4' | 'udp6'): Promise<void> {
+    return new Promise((resolve) => {
+      socket.on('error', (err) => {
+        log.error(`Discovery socket error (${type}):`, err);
       });
 
-      this.socket.on('message', (msg, rinfo) => {
-        this.handleMessage(msg, rinfo);
+      socket.on('message', (msg, rinfo) => {
+        this.handleMessage(msg, rinfo.address, type);
       });
 
-      this.socket.bind(DISCOVERY_PORT, () => {
-        this.socket?.setBroadcast(true);
-        log.info(`Discovery listener bound to port ${DISCOVERY_PORT}`);
+      socket.bind(DISCOVERY_PORT, type === 'udp6' ? '::' : '0.0.0.0', () => {
+        socket.setBroadcast(true);
+        log.info(`Discovery listener bound to port ${DISCOVERY_PORT} (${type})`);
         resolve();
       });
     });
   }
 
-  private startBroadcasting(): void {
-    this.broadcast();
+  private setupMdns(): void {
+    if (!this.mdnsInstance) return;
 
-    this.intervalId = setInterval(() => {
-      this.broadcast();
-    }, DISCOVERY_INTERVAL);
+    this.mdnsInstance.on('query', (query: any) => {
+      if (query.questions.some((q: any) => q.name === MDNS_SERVICE)) {
+        this.mdnsInstance.respond({
+          answers: [{
+            name: MDNS_SERVICE,
+            type: 'TXT',
+            data: Buffer.from(JSON.stringify(this.createDiscoveryMessage()))
+          }]
+        });
+      }
+    });
+
+    this.mdnsInstance.on('response', (response: any) => {
+      for (const answer of response.answers) {
+        if (answer.name === MDNS_SERVICE && answer.type === 'TXT') {
+          try {
+            const data = answer.data.toString();
+            this.handleMessage(Buffer.from(data), 'mdns-discovered', 'mdns');
+          } catch (err) {
+            log.warn('Failed to parse mDNS response:', err);
+          }
+        }
+      }
+    });
   }
 
-  private broadcast(): void {
-    if (!this.broadcaster) return;
-
-    const message: DiscoveryMessage = {
-      type: 'announce',
+  private createDiscoveryMessage(type: 'announce' | 'bye' = 'announce'): DiscoveryMessage {
+    return {
+      type,
       deviceId: this.deviceId,
       deviceName: this.deviceName,
       port: TRANSFER_PORT,
+      capabilities: this.getCapabilities()
     };
-
-    const buffer = Buffer.from(JSON.stringify(message));
-
-    const broadcastAddresses = this.getBroadcastAddresses();
-
-    for (const address of broadcastAddresses) {
-      this.broadcaster.send(buffer, DISCOVERY_PORT, address, (err) => {
-        if (err) {
-          log.warn(`Failed to broadcast to ${address}:`, err.message);
-        }
-      });
-    }
   }
 
-  private getBroadcastAddresses(): string[] {
-    const addresses: string[] = [];
+  private refresh(): void {
+    if (!this.isRunning) return;
+
+    const message = this.createDiscoveryMessage();
+    const buffer = Buffer.from(JSON.stringify(message));
+
+    // Broadcast IPv4
+    const broadcast4Addresses = this.getBroadcastAddresses4();
+    for (const address of broadcast4Addresses) {
+      this.broadcaster4?.send(buffer, DISCOVERY_PORT, address, (err) => {
+        if (err) log.warn(`Failed to broadcast to ${address}:`, err.message);
+      });
+    }
+
+    // Broadcast IPv6 (ff02::1 is all nodes on local network)
+    this.broadcaster6?.send(buffer, DISCOVERY_PORT, 'ff02::1', (err) => {
+      if (err) log.warn(`Failed to broadcast IPv6 to ff02::1:`, err.message);
+    });
+
+    // mDNS query and advertise
+    this.mdnsInstance?.query({
+      questions: [{ name: MDNS_SERVICE, type: 'TXT' }]
+    });
+    this.mdnsInstance?.respond({
+      answers: [{
+        name: MDNS_SERVICE,
+        type: 'TXT',
+        data: buffer
+      }]
+    });
+  }
+
+  private getBroadcastAddresses4(): string[] {
+    const addresses: string[] = ['255.255.255.255'];
     const interfaces = os.networkInterfaces();
 
     for (const name of Object.keys(interfaces)) {
@@ -153,33 +239,26 @@ export class DiscoveryService extends EventEmitter {
       if (!netInterface) continue;
 
       for (const info of netInterface) {
-        if (info.family === 'IPv4' && !info.internal && info.address === this.localIp) {
+        if (info.family === 'IPv4' && !info.internal) {
           const broadcastIp = this.calculateBroadcastAddress(info.address, info.netmask);
-          if (broadcastIp) {
+          if (broadcastIp && !addresses.includes(broadcastIp)) {
             addresses.push(broadcastIp);
           }
         }
       }
     }
-
-    if (addresses.length === 0) {
-      addresses.push('255.255.255.255');
-    }
-
     return addresses;
   }
 
   private calculateBroadcastAddress(ip: string, netmask: string): string | null {
     const ipParts = ip.split('.').map(Number);
     const maskParts = netmask.split('.').map(Number);
-
     if (ipParts.length !== 4 || maskParts.length !== 4) return null;
 
     const broadcastParts: number[] = [];
     for (let i = 0; i < 4; i++) {
       broadcastParts.push(ipParts[i] | (~maskParts[i] & 255));
     }
-
     return broadcastParts.join('.');
   }
 
@@ -196,7 +275,32 @@ export class DiscoveryService extends EventEmitter {
     }, DISCOVERY_TIMEOUT / 2);
   }
 
-  private handleMessage(msg: Buffer, rinfo: dgram.RemoteInfo): void {
+  private async measureRtt(ip: string, port: number): Promise<number | undefined> {
+    if (ip === 'mdns-discovered' || !ip) return undefined;
+    return new Promise((resolve) => {
+      const start = Date.now();
+      const socket = new net.Socket();
+      const timeout = setTimeout(() => {
+        socket.destroy();
+        resolve(undefined);
+      }, 2000);
+
+      socket.connect(port, ip, () => {
+        const rtt = Date.now() - start;
+        clearTimeout(timeout);
+        socket.destroy();
+        resolve(rtt);
+      });
+
+      socket.on('error', () => {
+        clearTimeout(timeout);
+        socket.destroy();
+        resolve(undefined);
+      });
+    });
+  }
+
+  private async handleMessage(msg: Buffer, sourceIp: string, method: 'udp4' | 'udp6' | 'mdns'): Promise<void> {
     try {
       const message: DiscoveryMessage = JSON.parse(msg.toString());
 
@@ -212,35 +316,56 @@ export class DiscoveryService extends EventEmitter {
         return;
       }
 
-      const isLocal = rinfo.address === this.localIp;
+      let device = this.devices.get(message.deviceId);
+      const isNew = !device;
 
-      const device: Device = {
-        id: message.deviceId,
-        name: message.deviceName,
-        ip: rinfo.address,
-        port: message.port,
-        lastSeen: Date.now(),
-        isLocal,
-      };
+      if (!device) {
+        device = {
+          id: message.deviceId,
+          name: message.deviceName,
+          addresses: [],
+          port: message.port,
+          lastSeen: Date.now(),
+          isLocal: this.localIps.includes(sourceIp),
+          discoveryMethods: [],
+          capabilities: message.capabilities
+        };
+        this.devices.set(message.deviceId, device);
+      }
 
-      const isNew = !this.devices.has(message.deviceId);
+      device.lastSeen = Date.now();
+      device.name = message.deviceName;
+      device.port = message.port;
+      
+      if (message.capabilities) {
+        device.capabilities = message.capabilities;
+      }
 
-      // Deduplicate by IP: if a different deviceId from the same IP exists, remove it.
-      // This handles cases where a device restarted and got a new deviceId before
-      // the old one timed out.
-      for (const [existingId, existingDevice] of this.devices) {
-        if (existingDevice.ip === rinfo.address && existingId !== message.deviceId) {
-          this.devices.delete(existingId);
-          this.emit('device-left', existingId);
-          log.info(`Removing stale device entry for ${existingDevice.name} at ${existingDevice.ip} (duplicate IP, new ID ${message.deviceId})`);
+      if (sourceIp !== 'mdns-discovered' && !device.addresses.includes(sourceIp)) {
+        device.addresses.push(sourceIp);
+        device.isLocal = device.isLocal || this.localIps.includes(sourceIp);
+      }
+
+      if (!device.discoveryMethods.includes(method)) {
+        device.discoveryMethods.push(method);
+      }
+
+      if (isNew || device.rtt === undefined) {
+        // Measure RTT if we have a valid IP
+        const ipToMeasure = device.addresses[0];
+        if (ipToMeasure) {
+          const rtt = await this.measureRtt(ipToMeasure, message.port);
+          if (rtt !== undefined) {
+            device.rtt = rtt;
+          }
         }
       }
 
-      this.devices.set(message.deviceId, device);
-
       if (isNew) {
         this.emit('device-discovered', device);
-        log.info(`Device discovered: ${device.name} (${device.ip})`);
+        log.info(`Device discovered: ${device.name} (methods: ${device.discoveryMethods.join(', ')}, rtt: ${device.rtt}ms)`);
+      } else {
+        this.emit('device-updated', device);
       }
     } catch (err) {
       log.warn('Failed to parse discovery message:', err);
@@ -250,26 +375,38 @@ export class DiscoveryService extends EventEmitter {
   async stop(): Promise<void> {
     if (!this.isRunning) return;
 
-    if (this.broadcaster) {
-      const byeMessage: DiscoveryMessage = {
-        type: 'bye',
-        deviceId: this.deviceId,
-        deviceName: this.deviceName,
-        port: 0,
-      };
-      const buffer = Buffer.from(JSON.stringify(byeMessage));
+    const byeMessage = this.createDiscoveryMessage('bye');
+    const buffer = Buffer.from(JSON.stringify(byeMessage));
 
-      for (const address of this.getBroadcastAddresses()) {
-        this.broadcaster.send(buffer, DISCOVERY_PORT, address);
+    if (this.broadcaster4) {
+      for (const address of this.getBroadcastAddresses4()) {
+        this.broadcaster4.send(buffer, DISCOVERY_PORT, address);
       }
-
-      this.broadcaster.close();
-      this.broadcaster = null;
+      this.broadcaster4.close();
+      this.broadcaster4 = null;
     }
 
-    if (this.intervalId) {
-      clearInterval(this.intervalId);
-      this.intervalId = null;
+    if (this.broadcaster6) {
+      this.broadcaster6.send(buffer, DISCOVERY_PORT, 'ff02::1');
+      this.broadcaster6.close();
+      this.broadcaster6 = null;
+    }
+
+    if (this.mdnsInstance) {
+      this.mdnsInstance.respond({
+        answers: [{
+          name: MDNS_SERVICE,
+          type: 'TXT',
+          data: buffer
+        }]
+      });
+      this.mdnsInstance.destroy();
+      this.mdnsInstance = null;
+    }
+
+    if (this.refreshIntervalId) {
+      clearInterval(this.refreshIntervalId);
+      this.refreshIntervalId = null;
     }
 
     if (this.cleanupIntervalId) {
@@ -277,9 +414,14 @@ export class DiscoveryService extends EventEmitter {
       this.cleanupIntervalId = null;
     }
 
-    if (this.socket) {
-      this.socket.close();
-      this.socket = null;
+    if (this.socket4) {
+      this.socket4.close();
+      this.socket4 = null;
+    }
+
+    if (this.socket6) {
+      this.socket6.close();
+      this.socket6 = null;
     }
 
     this.isRunning = false;
@@ -299,9 +441,6 @@ export class DiscoveryService extends EventEmitter {
   }
 
   updateLocalIp(ip: string): void {
-    if (ip && ip !== this.localIp) {
-      log.info(`Local IP changed: ${this.localIp} -> ${ip}`);
-      this.localIp = ip;
-    }
+    this.updateLocalIps();
   }
 }

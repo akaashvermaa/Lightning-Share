@@ -8,6 +8,7 @@ const DEFAULT_APP_SETTINGS: AppSettings = {
   trustedDevices: [],
   compressionEnabled: true,
   theme: 'system',
+  bandwidthLimit: 0,
 };
 
 interface AppState {
@@ -24,6 +25,7 @@ interface AppState {
   addDevice: (device: Device) => void;
   removeDevice: (deviceId: string) => void;
   setSettings: (settings: Partial<AppSettings>) => Promise<void>;
+  setDeviceName: (name: string) => void;
   setDownloadPath: (path: string) => void;
 }
 
@@ -79,5 +81,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ settings });
   },
 
+  setDeviceName: (deviceName) => set({ deviceName }),
   setDownloadPath: (path) => set({ downloadPath: path }),
 }));

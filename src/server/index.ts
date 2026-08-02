@@ -20,6 +20,7 @@ import {
   AppSettings,
 } from '../shared/types';
 import { DEFAULT_APP_SETTINGS } from '../shared/constants';
+import { certificateManager } from '../services/transfer/certificate';
 
 const PORT = parseInt(process.env.PORT || '51236', 10);
 const IS_DEV = process.env.NODE_ENV !== 'production';
@@ -35,6 +36,8 @@ const pendingFileData = new Map<string, { resolve: (p: string) => void; reject: 
 async function initializeServices(): Promise<void> {
   fileService = new FileService();
   transferService = new TransferService(fileService);
+  transferService.setBandwidthLimit(settings.bandwidthLimit || 0);
+  transferService.setCompressionEnabled(settings.compressionEnabled);
   discoveryService = new DiscoveryService();
 
   await transferService.waitUntilReady();
@@ -106,6 +109,204 @@ function setupWSServer(server: http.Server): void {
   });
 }
 
+// ---------------------------------------------------------------------------
+// /ws-stream — streaming upload channel.
+// The browser sends:
+//   1. {type:'start', deviceId, fileCount}          → server replies {type:'ready', sessionId}
+//   2. {type:'manifest-entry', sessionId, fileId,
+//         path, size, mtime, mimeType}               → server prepares a temp file slot
+//   3. Binary frames: [4B idLen][idBytes][4B chunkIdx][payload]  → appended to temp file
+//   4. {type:'file-complete', sessionId, fileId}     → file fully received; hand to TransferService
+//   5. {type:'manifest-done', sessionId}             → all files received; start P2P session
+// ---------------------------------------------------------------------------
+interface StreamEntry {
+  fileId: string;
+  relativePath: string;
+  size: number;
+  mtime?: number;
+  ctime?: number;
+  permissions?: number;
+  hidden?: boolean;
+  readonly?: boolean;
+  isDirectory: boolean;
+  mimeType: string;
+  tempPath: string;
+  bytesReceived: number;
+  writeStream: fs.WriteStream | null;
+}
+
+function setupStreamWSServer(server: http.Server): void {
+  const streamWss = new WebSocketServer({ server, path: '/ws-stream' });
+
+  streamWss.on('connection', (ws) => {
+    log.info('[StreamWS] Client connected');
+
+    let sessionId: string | null = null;
+    let deviceId: string | null = null;
+    const entries = new Map<string, StreamEntry>();
+    const completedFiles: FileInfo[] = [];
+    let currentFileId: string | null = null; // fileId of the currently streaming binary file
+
+    const sendJSON = (obj: any) => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(obj));
+      }
+    };
+
+    ws.on('message', async (raw, isBinary) => {
+      try {
+        if (isBinary) {
+          // Binary chunk frame: [4B fileIdLen][fileIdBytes][4B chunkIndex][payload]
+          const buf = raw as Buffer;
+          if (buf.byteLength < 8) return;
+
+          const idLen = buf.readUInt32BE(0);
+          if (buf.byteLength < 4 + idLen + 4) return;
+
+          const fileId = buf.slice(4, 4 + idLen).toString('utf8');
+          // chunkIndex at offset 4+idLen (not used for write ordering, we append sequentially)
+          const payload = buf.slice(4 + idLen + 4);
+
+          const entry = entries.get(fileId);
+          if (!entry) {
+            log.warn(`[StreamWS] Binary chunk for unknown fileId ${fileId}`);
+            return;
+          }
+
+          currentFileId = fileId;
+
+          if (!entry.writeStream) {
+            const tmpDir = path.join(os.tmpdir(), 'lightningshare-stream');
+            await fs.promises.mkdir(tmpDir, { recursive: true });
+            entry.tempPath = path.join(tmpDir, `${fileId}${path.extname(entry.relativePath)}`);
+            entry.writeStream = fs.createWriteStream(entry.tempPath, { flags: 'a' });
+          }
+
+          await new Promise<void>((resolve, reject) => {
+            entry.writeStream!.write(payload, (err) => err ? reject(err) : resolve());
+          });
+          entry.bytesReceived += payload.byteLength;
+          return;
+        }
+
+        // Control message
+        const msg = JSON.parse((raw as Buffer).toString());
+
+        if (msg.type === 'start') {
+          deviceId = msg.deviceId;
+          sessionId = uuidv4();
+          log.info(`[StreamWS] Session started: ${sessionId} → device ${deviceId}`);
+          sendJSON({ type: 'ready', sessionId });
+          return;
+        }
+
+        if (msg.type === 'manifest-entry') {
+          const entry: StreamEntry = {
+            fileId: msg.fileId,
+            relativePath: msg.path, // Preserved relative path!
+            size: msg.size,
+            mtime: msg.mtime,
+            ctime: msg.ctime,
+            permissions: msg.permissions,
+            hidden: msg.hidden,
+            readonly: msg.readonly,
+            isDirectory: !!msg.isDirectory,
+            mimeType: msg.mimeType,
+            tempPath: '',
+            bytesReceived: 0,
+            writeStream: null,
+          };
+          entries.set(msg.fileId, entry);
+          log.debug(`[StreamWS] Manifest entry: ${msg.path} (${msg.size} bytes) isDir=${entry.isDirectory}`);
+          return;
+        }
+
+        if (msg.type === 'file-complete') {
+          const entry = entries.get(msg.fileId);
+          if (!entry) return;
+
+          // Flush & close write stream
+          await new Promise<void>((resolve) => {
+            if (entry.writeStream) {
+              entry.writeStream.end(resolve);
+            } else {
+              resolve();
+            }
+          });
+
+          // Handle zero-byte files (no binary frames)
+          // Do NOT create temp paths for directories
+          if (!entry.tempPath && !entry.isDirectory) {
+            const tmpDir = path.join(os.tmpdir(), 'lightningshare-stream');
+            await fs.promises.mkdir(tmpDir, { recursive: true });
+            entry.tempPath = path.join(tmpDir, `${msg.fileId}${path.extname(entry.relativePath)}`);
+            await fs.promises.writeFile(entry.tempPath, Buffer.alloc(0));
+          }
+
+          const fileInfo: FileInfo = {
+            id: entry.fileId,
+            name: entry.relativePath, // BUG FIX: Don't flatten with path.basename()
+            path: entry.tempPath,
+            size: entry.bytesReceived || entry.size,
+            isDirectory: entry.isDirectory,
+            mimeType: entry.mimeType,
+            mtime: entry.mtime,
+            ctime: entry.ctime,
+            permissions: entry.permissions,
+            hidden: entry.hidden,
+            readonly: entry.readonly,
+          };
+          completedFiles.push(fileInfo);
+          log.debug(`[StreamWS] File completed: ${entry.relativePath} → ${entry.tempPath}`);
+          return;
+        }
+
+        if (msg.type === 'manifest-done') {
+          if (!deviceId || !sessionId || completedFiles.length === 0) {
+            sendJSON({ type: 'error', error: 'No files received' });
+            return;
+          }
+
+          const device = discoveryService.getDevices().find((d) => d.id === deviceId);
+          if (!device) {
+            sendJSON({ type: 'error', error: `Device ${deviceId} not found` });
+            return;
+          }
+
+          try {
+            const session = await transferService.createSession(device, completedFiles, 'sending');
+            if (!session) {
+              sendJSON({ type: 'error', error: 'Failed to create transfer session' });
+              return;
+            }
+            await transferService.startSession(session.id);
+            sendJSON({ type: 'transfer-started', sessionId: session.id });
+            log.info(`[StreamWS] Transfer session started: ${session.id}`);
+          } catch (err) {
+            log.error('[StreamWS] Transfer start error:', err);
+            sendJSON({ type: 'error', error: (err as Error).message });
+          }
+          return;
+        }
+
+      } catch (err) {
+        log.error('[StreamWS] Message error:', err);
+      }
+    });
+
+    ws.on('close', () => {
+      log.info('[StreamWS] Client disconnected');
+      // Clean up any uncompleted write streams
+      for (const entry of entries.values()) {
+        if (entry.writeStream) {
+          entry.writeStream.destroy();
+        }
+      }
+    });
+  });
+}
+
+
 async function handleWSUploadChunk(ws: WebSocket, msg: any): Promise<void> {
   const { uploadId, chunkIndex, data, isLast } = msg;
   log.debug(`Upload chunk ${chunkIndex} for ${uploadId}, size=${data?.length || 0}`);
@@ -156,6 +357,16 @@ function createApp(): express.Express {
     });
   });
 
+  app.get('/api/diagnostics', (_req, res) => {
+    res.json(buildDiagnosticsReport());
+  });
+
+  app.get('/api/diagnostics/export', (_req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', 'attachment; filename="lightningshare-diagnostics.json"');
+    res.send(JSON.stringify(buildDiagnosticsReport(), null, 2));
+  });
+
   // --- Device info ---
   app.get('/api/device-id', (_req, res) => {
     res.json({ id: discoveryService.getDeviceId() });
@@ -200,6 +411,8 @@ function createApp(): express.Express {
 
   app.post('/api/settings', (req, res) => {
     settings = { ...settings, ...req.body };
+    transferService.setBandwidthLimit(settings.bandwidthLimit || 0);
+    transferService.setCompressionEnabled(settings.compressionEnabled);
     res.json(settings);
   });
 
@@ -454,10 +667,53 @@ function createApp(): express.Express {
 }
 
 function serializeSession(session: TransferSession): any {
+  const internal = session as any;
   return {
     ...session,
     acknowledgedChunks: Array.from(session.acknowledgedChunks),
     speedHistory: session.speedHistory,
+    fileResume: internal.fileResume
+      ? Object.fromEntries(Object.entries(internal.fileResume).map(([fileId, state]: [string, any]) => [
+        fileId,
+        {
+          acknowledgedChunks: Array.from(state.acknowledgedChunks || []),
+          contiguousBytes: state.contiguousBytes || 0,
+          completed: Boolean(state.completed),
+        },
+      ]))
+      : undefined,
+  };
+}
+
+function buildDiagnosticsReport(): any {
+  return {
+    generatedAt: new Date().toISOString(),
+    app: {
+      version: '1.0.0',
+      platform: process.platform,
+      arch: process.arch,
+      node: process.version,
+      pid: process.pid,
+      uptimeSeconds: Math.round(process.uptime()),
+    },
+    process: {
+      memory: process.memoryUsage(),
+      cpu: process.cpuUsage(),
+      resource: process.resourceUsage(),
+    },
+    network: Object.fromEntries(
+      Object.entries(os.networkInterfaces()).map(([name, entries]) => [
+        name,
+        (entries || []).map(entry => ({
+          address: entry.address,
+          family: entry.family,
+          internal: entry.internal,
+        })),
+      ]),
+    ),
+    discovery: discoveryService.getDiagnostics(),
+    tls: certificateManager.getDiagnostics(),
+    transfers: transferService.getDiagnostics(),
   };
 }
 
@@ -506,6 +762,8 @@ async function main(): Promise<void> {
   const server = http.createServer(app);
 
   setupWSServer(server);
+  setupStreamWSServer(server);
+
 
   server.listen(PORT, () => {
     log.info(`Server listening on http://localhost:${PORT}`);

@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react';
 import { FileInfo } from '../../shared/types';
 import { UploadProgress } from '../api';
+import DropZone from './DropZone';
 
 interface TransferModalProps {
   deviceId: string;
@@ -10,45 +11,21 @@ interface TransferModalProps {
 export default function TransferModal({ deviceId, onClose }: TransferModalProps) {
   const [files, setFiles] = useState<FileInfo[]>([]);
   const [isSending, setIsSending] = useState(false);
-  const [isUploading, setIsUploading] = useState(false);
+  const [isUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const lastUploadRender = useRef(0);
   const [sendStatus, setSendStatus] = useState<'idle' | 'uploading' | 'sent' | 'error'>('idle');
 
-  const handleSelectFiles = async () => {
-    setIsUploading(true);
-    setUploadError(null);
-    try {
-      const selected = await window.lightningshare.selectFiles((progress) => {
-        reportUploadProgress(progress);
-      });
-      if (selected.length > 0) {
-        setFiles(selected);
-      }
-    } catch (error) {
-      setUploadError(error instanceof Error ? error.message : 'Upload failed');
-    } finally {
-      setIsUploading(false);
-      setUploadProgress(null);
-    }
-  };
-
   const handleSelectFolder = async () => {
-    setIsUploading(true);
     setUploadError(null);
     try {
-      const folderFiles = await window.lightningshare.selectFolder((progress) => {
-        reportUploadProgress(progress);
-      });
+      const folderFiles = await window.lightningshare.selectFolder();
       if (folderFiles && folderFiles.length > 0) {
         setFiles(folderFiles);
       }
     } catch (error) {
-      setUploadError(error instanceof Error ? error.message : 'Upload failed');
-    } finally {
-      setIsUploading(false);
-      setUploadProgress(null);
+      setUploadError(error instanceof Error ? error.message : 'Failed to pick folder');
     }
   };
 
@@ -177,25 +154,34 @@ export default function TransferModal({ deviceId, onClose }: TransferModalProps)
             </div>
           ) : files.length === 0 ? (
             <div className="space-y-3">
-              <button
-                onClick={handleSelectFiles}
-                className="w-full px-4 py-3 border border-slate-300 rounded-lg text-slate-700 hover:bg-slate-50 transition-colors flex items-center justify-center gap-2"
-              >
-                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
-                  <polyline points="13 2 13 9 20 9" />
-                </svg>
-                Select Files
-              </button>
+              <DropZone
+                onFilesSelected={(selected) => {
+                  setFiles(selected);
+                  setUploadProgress(null);
+                }}
+                onProgress={reportUploadProgress}
+              />
               <button
                 onClick={handleSelectFolder}
-                className="w-full px-4 py-3 border border-slate-300 rounded-lg text-slate-700 hover:bg-slate-50 transition-colors flex items-center justify-center gap-2"
+                disabled={isUploading}
+                className="w-full px-4 py-2.5 border border-slate-300 rounded-lg text-slate-700 hover:bg-slate-50 transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
               >
                 <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                   <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
                 </svg>
                 Select Folder
               </button>
+              {uploadProgress && (
+                <div className="rounded-lg bg-slate-50 p-3">
+                  <div className="flex items-center justify-between text-xs text-slate-500 mb-1.5">
+                    <span className="truncate pr-2">{uploadProgress.fileName || 'Preparing files...'}</span>
+                    <span className="font-medium text-primary-600">{Math.round(uploadProgress.percentage)}%</span>
+                  </div>
+                  <div className="h-1.5 bg-slate-200 rounded-full overflow-hidden">
+                    <div className="h-full bg-primary-500 rounded-full transition-[width]" style={{ width: `${uploadProgress.percentage}%` }} />
+                  </div>
+                </div>
+              )}
               {uploadError && (
                 <p className="text-sm text-center text-red-500">{uploadError}</p>
               )}

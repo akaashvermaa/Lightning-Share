@@ -18,6 +18,7 @@ interface TransferState {
   cancelTransfer: (sessionId: string) => Promise<void>;
   pauseTransfer: (sessionId: string) => Promise<void>;
   resumeTransfer: (sessionId: string) => Promise<void>;
+  retryTransfer: (sessionId: string) => Promise<string | null>;
 }
 
 export const useTransferStore = create<TransferState>((set, get) => ({
@@ -130,5 +131,15 @@ export const useTransferStore = create<TransferState>((set, get) => ({
 
   resumeTransfer: async (sessionId) => {
     await window.lightningshare.resumeTransfer(sessionId);
+  },
+
+  retryTransfer: async (sessionId) => {
+    const session = get().sessions.find(item => item.id === sessionId);
+    if (!session || session.direction !== 'sending') return null;
+    const result = await window.lightningshare.startTransfer(session.deviceId, session.files);
+    if (!result.success || !result.sessionId) return null;
+    const nextSession = await window.lightningshare.getTransferSession(result.sessionId);
+    if (nextSession) get().addSession(nextSession);
+    return result.sessionId;
   },
 }));

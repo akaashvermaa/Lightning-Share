@@ -3,6 +3,9 @@ export const TRANSFER_PORT = 51235;
 export const DISCOVERY_INTERVAL = 2000;
 export const DISCOVERY_TIMEOUT = 10000;
 export const MAX_PACKET_SIZE = 65507;
+// Transfer frames contain a small JSON header plus at most one configured chunk.
+// Rejecting larger frames prevents a peer from forcing unbounded buffer growth.
+export const MAX_TRANSFER_FRAME_SIZE = 64 * 1024 * 1024;
 export const CHUNK_SIZE_SMALL = 64 * 1024;
 export const CHUNK_SIZE_MEDIUM = 256 * 1024;
 export const CHUNK_SIZE_LARGE = 512 * 1024;
@@ -61,4 +64,5 @@ export const DEFAULT_APP_SETTINGS = {
   trustedDevices: [],
   compressionEnabled: true,
   theme: 'system' as const,
+  bandwidthLimit: 0,
 };
