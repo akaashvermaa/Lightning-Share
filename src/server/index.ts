@@ -140,8 +140,15 @@ function setupStreamWSServer(): WebSocketServer {
       }
     };
 
-    ws.on('message', async (raw, isBinary) => {
-      try {
+    // Serialize all message processing onto a single promise chain so that
+    // manifest-done is never evaluated before file-complete has finished writing.
+    // Without this, async handlers run concurrently and completedFiles appears
+    // empty at manifest-done time even though a file-complete message arrived first.
+    let processingChain = Promise.resolve();
+
+    ws.on('message', (raw, isBinary) => {
+      processingChain = processingChain.then(async () => {
+        try {
         if (isBinary) {
           // Binary chunk frame: [4B fileIdLen][fileIdBytes][4B chunkIndex][payload]
           const buf = raw as Buffer;
@@ -290,9 +297,10 @@ function setupStreamWSServer(): WebSocketServer {
           return;
         }
 
-      } catch (err) {
-        log.error('[StreamWS] Message error:', err);
-      }
+        } catch (err) {
+          log.error('[StreamWS] Message error:', err);
+        }
+      });
     });
 
     ws.on('close', () => {
