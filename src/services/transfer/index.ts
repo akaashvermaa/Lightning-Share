@@ -1347,7 +1347,8 @@ export class TransferService extends EventEmitter {
     const activeFilesMap = (session as any).activeFiles;
     if (!activeFilesMap) return;
 
-    const readAheadLimit = Math.max(8, ((session as any).windowSize || TRANSFER_WINDOW_SIZE) * 2);
+    // Hardcode Window Size to 16
+    const readAheadLimit = Math.max(8, 16 * 2);
     let totalPrefetched = 0;
 
     for (const af of activeFilesMap.values()) {
@@ -1370,8 +1371,11 @@ export class TransferService extends EventEmitter {
        }
     }
 
+    // Hardcode Window Size to 16 to prevent the broken adaptive engine from throttling transfers
+    (session as any).windowSize = 16;
+    
     while (
-      totalInFlight < ((session as any).windowSize || TRANSFER_WINDOW_SIZE) &&
+      totalInFlight < 16 &&
       session.status !== 'completed' &&
       session.status !== 'failed' &&
       session.status !== 'cancelled'
@@ -1468,7 +1472,7 @@ export class TransferService extends EventEmitter {
     if (!metrics.chunkSentAt) metrics.chunkSentAt = new Map();
     metrics.chunkSentAt.set(`${fileInfo.id}:${unacknowledged.index}`, Date.now());
 
-    this.sendMessage(socket, {
+    await this.sendMessage(socket, {
       type: 'chunk',
       sessionId: session.id,
       fileId: fileInfo.id,
@@ -1543,7 +1547,7 @@ export class TransferService extends EventEmitter {
 
     const checksum = ''; // Disabled for performance
 
-    this.sendMessage(connection.socket, {
+    await this.sendMessage(connection.socket, {
       type: 'chunk',
       sessionId: session.id,
       fileId: fileInfo.id,
@@ -1585,7 +1589,7 @@ export class TransferService extends EventEmitter {
     }, timeoutMs);
   }
 
-  private sendMessage(socket: tls.TLSSocket | net.Socket, message: any): void {
+  private async sendMessage(socket: tls.TLSSocket | net.Socket, message: any): Promise<void> {
     const remoteAddr = (socket as any).remoteAddress || 'unknown';
     if (socket.destroyed || socket.writable === false) {
       log.warn(`[TRACE] SEND ${message.type} SKIPPED socket=${remoteAddr} destroyed=${socket.destroyed} writable=${socket.writable}`);
@@ -1597,19 +1601,23 @@ export class TransferService extends EventEmitter {
         : log.info.bind(log);
       messageLog(`[TRACE] SEND ${message.type} START session=${message.sessionId || 'unknown'} socket=${remoteAddr}`);
       const frame = encodeFrame(message);
-      // Socket Buffer Optimization: if the kernel write buffer is full, wait
-      // for 'drain' before writing. This prevents memory from piling up.
-      const ok = socket.write(frame, (err) => {
-        if (err) {
-          log.error(`[TRACE] SEND ${message.type} ERROR socket=${remoteAddr}:\n${errorDetails(err)}`);
-          return;
+
+      await new Promise<void>((resolve, reject) => {
+        const ok = socket.write(frame, (err) => {
+          if (err) {
+            log.error(`[TRACE] SEND ${message.type} ERROR socket=${remoteAddr}:\n${errorDetails(err)}`);
+            reject(err);
+            return;
+          }
+          messageLog(`[TRACE] SEND ${message.type} SUCCESS session=${message.sessionId || 'unknown'} socket=${remoteAddr} bytes=${frame.length}`);
+          if (ok) resolve();
+        });
+
+        if (!ok) {
+          log.debug(`[TRACE] SEND ${message.type} BUFFERED socket=${remoteAddr} queued=${socket.writableLength}B`);
+          socket.once('drain', resolve);
         }
-        messageLog(`[TRACE] SEND ${message.type} SUCCESS session=${message.sessionId || 'unknown'} socket=${remoteAddr} bytes=${frame.length}`);
       });
-      if (!ok) {
-        // Socket buffer is full — log for metrics but don't block (Node will buffer).
-        log.debug(`[TRACE] SEND ${message.type} BUFFERED socket=${remoteAddr} queued=${socket.writableLength}B`);
-      }
     } catch (err) {
       log.error(`[TRACE] SEND ${message.type} ERROR socket=${remoteAddr}:\n${errorDetails(err)}`);
     }
