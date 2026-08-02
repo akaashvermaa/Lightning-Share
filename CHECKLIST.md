@@ -134,6 +134,7 @@ Every device is a Peer.
 - [x] Keyboard Navigation
 - [x] Search Transfer History
 - [x] Filter History
+- [x] Clear Transfer History
 - [x] Progress Indicators
 - [x] Error Messages
 - [x] Network Indicator
@@ -385,3 +386,22 @@ Before every release verify:
 - [ ] Works with very small files.
 - [ ] No unsupported file extensions.
 - [ ] Clear error messages for all failure scenarios.
+
+---
+
+# 16. Future Roadmap
+
+## Version 1.5 – Fast
+- [x] **Static Tiered Chunk Sizes**: Statically adjust chunk size based on file size (<50MB, 50MB-1GB, >1GB).
+- [x] **Parallel Small-File Engine**: Keep multiple files flowing simultaneously (up to 4 active small files) for a massive speedup on projects like Node.js, Unity, etc.
+- [x] **Smart Scheduler**: Prioritize important files like `README`, `package.json`, `src`, `config` before others.
+- [x] **Memory Pool + Buffer Reuse**: Reuse buffers instead of allocating new ones for every chunk to lower GC pressure and sustain higher throughput.
+- [x] **Simple Auto Tuning**: System dynamically tunes window size based on ACKs without complex CPU/disk overhead.
+
+## Version 2.0 – Professional
+- [x] **Workspace Sync**: Sync workspaces by transferring only changed files instead of the entire folder.
+- [x] **Smart Resume Engine**: Store Transfer ID, Chunk Bitmap, Current Window, Hash State, and Pending Queue to seamlessly resume transfers across app crashes, restarts, or disconnects.
+- [x] **Protocol V3**: Separate protocol into a Control Channel (JSON for ACK, Resume, Errors, Manifest) and a Data Channel (Raw Binary Only).
+- [x] **Built-in Benchmark Engine**: One-click benchmark to measure read/write speed, network throughput, RTT, CPU, and RAM to automatically recommend settings.
+- [x] **Smart Network Selection**: Automatically pick the fastest path (Wi-Fi, Ethernet, VPN) and seamlessly fallback if a network drops.
+- [x] **Deep Diagnostics**: Expose RTT, Packet Loss, Window Size, Chunks In Flight, Disk Speed, CPU, Compression Ratio, and identify the current bottleneck (e.g., Receiver HDD, Weak Wi-Fi).

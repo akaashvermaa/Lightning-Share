@@ -573,6 +573,12 @@ export const lightningshareAPI = {
     apiPost('/transfer/pause', { sessionId }).then(() => ({ success: true })),
   resumeTransfer: (sessionId: string) =>
     apiPost('/transfer/resume', { sessionId }).then(() => ({ success: true })),
+  clearHistory: () =>
+    apiPost('/transfer/clear-history').then(() => ({ success: true })),
+  
+  runBenchmark: async (): Promise<{ readSpeedMBps: number; writeSpeedMBps: number; networkSpeedMBps: number }> => {
+    return apiPost('/benchmark/run');
+  },
 
   getTransferSessions: async (): Promise<TransferSession[]> => {
     const sessions = await apiGet<any[]>('/transfer/sessions');

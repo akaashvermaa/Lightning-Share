@@ -1,9 +1,8 @@
 import { useState } from 'react';
 import { useTransferStore } from '../stores/transferStore';
-import SpeedGraph, { formatSpeed } from '../components/SpeedGraph';
-
-export default function TransfersPage() {
-  const { sessions } = useTransferStore();
+import SpeedGraph, { formatSpeed, LiveSpeedGraph } from '../components/SpeedGraph';
+export default function TransfersPage() {
+  const { sessions, clearHistory } = useTransferStore();
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<'all' | 'active' | 'completed' | 'failed'>('all');
 
@@ -33,6 +32,14 @@ export default function TransfersPage() {
           </div>
           <div className="hidden sm:flex items-center gap-3">
             <span className="text-sm text-slate-400">{sessions.length} total</span>
+            {sessions.length > 0 && (
+              <button 
+                onClick={() => clearHistory()} 
+                className="px-3 py-2 text-sm font-medium text-red-600 border border-red-200 rounded-lg hover:bg-red-50 transition-colors"
+              >
+                Clear History
+              </button>
+            )}
             <button onClick={() => exportHistory(sessions)} className="px-3 py-2 text-sm font-medium text-slate-600 border border-slate-200 rounded-lg hover:bg-slate-50">Export</button>
           </div>
         </div>
@@ -332,6 +339,15 @@ function TransferCard({ session }: { session: any }) {
           {progress.toFixed(1)}%
         </div>
       </div>
+
+      {isActive && session.speedHistory.length > 1 && (
+        <div className="mt-4 pt-4 border-t border-slate-100">
+          <p className="text-xs font-medium text-slate-500 mb-2">Live Throughput</p>
+          <div className="bg-slate-50 rounded-lg p-2 border border-slate-200">
+            <LiveSpeedGraph data={session.speedHistory} height={120} />
+          </div>
+        </div>
+      )}
 
       {session.metrics && isActive && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-3 text-xs">

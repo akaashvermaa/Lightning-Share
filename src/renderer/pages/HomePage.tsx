@@ -8,7 +8,7 @@ import IncomingTransferToast from '../components/IncomingTransferToast';
 import { formatSpeed } from '../components/SpeedGraph';
 
 export default function HomePage() {
-  const { devices, localIp } = useAppStore();
+  const { devices, localIp, settings, setSettings } = useAppStore();
   const { sessions, incomingTransfers } = useTransferStore();
   const [selectedDevice, setSelectedDevice] = useState<string | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -69,9 +69,6 @@ export default function HomePage() {
     s => s.status === 'transferring' || s.status === 'paused' || s.status === 'reconnecting' || s.status === 'connecting' || s.status === 'pending'
   );
   const recentCompleted = sessions.filter(s => s.status === 'completed').slice(-3);
-  const failedTransfers = sessions.filter(
-    s => s.status === 'failed' || s.status === 'declined'
-  );
 
   return (
     <div className="h-full flex flex-col">
@@ -220,20 +217,30 @@ export default function HomePage() {
               </span>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {devices.map(device => (
-                <DeviceCard
-                  key={device.id}
-                  device={device}
-                  onSend={() => handleSendFiles(device.id)}
-                  disabled={isRemoteBrowser}
-                />
-              ))}
+              {devices.map(device => {
+                const isTrusted = settings.trustedDevices?.includes(device.id);
+                return (
+                  <DeviceCard
+                    key={device.id}
+                    device={device}
+                    onSend={() => handleSendFiles(device.id)}
+                    disabled={isRemoteBrowser}
+                    isTrusted={isTrusted}
+                    onToggleTrust={() => {
+                      const newTrusted = isTrusted 
+                        ? (settings.trustedDevices || []).filter(id => id !== device.id)
+                        : [...(settings.trustedDevices || []), device.id];
+                      setSettings({ trustedDevices: newTrusted });
+                    }}
+                  />
+                );
+              })}
             </div>
           </div>
         )}
       </div>
 
-      {(activeTransfers.length > 0 || failedTransfers.length > 0 || recentCompleted.length > 0) && (
+      {(activeTransfers.length > 0 || recentCompleted.length > 0) && (
         <div className="border-t border-slate-200 bg-white p-4 max-h-64 overflow-auto">
           <div className="flex items-center justify-between mb-3">
             <h3 className="text-sm font-medium text-slate-700 flex items-center gap-2">
@@ -248,15 +255,12 @@ export default function HomePage() {
             <div className="flex items-center gap-3">
               <Link to="/transfers" className="text-xs font-medium text-primary-600 hover:text-primary-700">View all</Link>
               <span className="text-xs text-slate-400">
-                {activeTransfers.length} active · {recentCompleted.length} completed · {failedTransfers.length} failed
+                {activeTransfers.length} active · {recentCompleted.length} completed
               </span>
             </div>
           </div>
           <div className="space-y-2">
             {activeTransfers.map(session => (
-              <ActivityRow key={session.id} session={session} />
-            ))}
-            {failedTransfers.slice(-2).map(session => (
               <ActivityRow key={session.id} session={session} />
             ))}
             {recentCompleted.map(session => (

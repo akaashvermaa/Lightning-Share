@@ -13,10 +13,12 @@ declare global {
   }
 }
 
+
 export default function App() {
   const { initialize, setDevices, addDevice, removeDevice } = useAppStore();
   const { setSessions, updateSession } = useTransferStore();
-  const [completedNotice, setCompletedNotice] = useState<{ name: string } | null>(null);
+  const [completedNotice, setCompletedNotice] = useState<{ name: string; duration: string; avgSpeed: string; filePath?: string } | null>(null);
+  const [startedNotice, setStartedNotice] = useState<{ name: string; direction: 'sending' | 'receiving'; deviceName: string } | null>(null);
 
   useEffect(() => {
     initialize();
@@ -30,15 +32,38 @@ export default function App() {
     });
 
     const unsubSessionUpdated = window.lightningshare.onSessionUpdated((session) => {
+      const existing = useTransferStore.getState().sessions.find(s => s.id === session.id);
+      if (existing && existing.status !== 'transferring' && session.status === 'transferring') {
+        setStartedNotice({
+          name: session.files[0]?.name || 'Transfer',
+          direction: session.direction,
+          deviceName: session.deviceName,
+        });
+        window.setTimeout(() => setStartedNotice(null), 4000);
+      }
       updateSession(session);
     });
 
     const unsubSessionCompleted = window.lightningshare.onSessionCompleted((session) => {
       updateSession(session);
+      
+      const durationSecs = session.completedAt && session.startedAt 
+        ? Math.max(1, Math.round((session.completedAt - session.startedAt) / 1000))
+        : 1;
+      const avgSpeedMBps = (session.totalSize / durationSecs) / (1024 * 1024);
+      
+      let durationStr = `${durationSecs}s`;
+      if (durationSecs >= 60) {
+        durationStr = `${Math.floor(durationSecs / 60)}m ${durationSecs % 60}s`;
+      }
+      
       setCompletedNotice({
         name: session.files[0]?.name || 'Transfer',
+        duration: durationStr,
+        avgSpeed: `${Math.round(avgSpeedMBps)} MB/s`,
+        filePath: session.files[0]?.path
       });
-      window.setTimeout(() => setCompletedNotice(null), 5000);
+      window.setTimeout(() => setCompletedNotice(null), 8000);
     });
 
     const unsubSessionError = window.lightningshare.onSessionError((sessionId, error) => {
@@ -109,18 +134,71 @@ export default function App() {
           <NavLink to="/transfers" icon="transfer" label="Transfers" />
           <NavLink to="/settings" icon="settings" label="Settings" />
         </div>
+        {startedNotice && (
+          <div className="fixed bottom-20 sm:bottom-auto sm:top-4 right-4 z-40 w-[min(380px,calc(100vw-2rem))] bg-white border border-blue-200 rounded-xl shadow-xl p-4 animate-slide-in">
+            <div className="flex items-start gap-3">
+              <div className="w-9 h-9 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center shrink-0">
+                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
+                </svg>
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="font-semibold text-slate-800">
+                  {startedNotice.direction === 'sending' ? 'Sending Transfer Started' : 'Receiving Transfer Started'}
+                </p>
+                <p className="text-sm text-slate-500 truncate mt-0.5">{startedNotice.name}</p>
+                <p className="text-xs text-slate-400 mt-1">
+                  {startedNotice.direction === 'sending' ? 'To' : 'From'} {startedNotice.deviceName}
+                </p>
+                <div className="mt-3 flex gap-2">
+                  <Link to="/transfers" onClick={() => setStartedNotice(null)} className="flex-1 px-3 py-1.5 bg-blue-50 text-blue-700 font-medium text-sm rounded-lg hover:bg-blue-100 transition-colors text-center">
+                    View Progress
+                  </Link>
+                  <button onClick={() => setStartedNotice(null)} className="flex-1 px-3 py-1.5 bg-slate-100 text-slate-600 font-medium text-sm rounded-lg hover:bg-slate-200 transition-colors text-center">
+                    Dismiss
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
         {completedNotice && (
-          <div className="fixed top-4 right-4 z-40 w-[min(360px,calc(100vw-2rem))] bg-white border border-green-200 rounded-xl shadow-xl p-4 animate-slide-in">
+          <div className="fixed bottom-20 sm:bottom-auto sm:top-4 right-4 z-40 w-[min(380px,calc(100vw-2rem))] bg-white border border-green-200 rounded-xl shadow-xl p-4 animate-slide-in">
             <div className="flex items-start gap-3">
               <div className="w-9 h-9 rounded-full bg-green-50 text-green-600 flex items-center justify-center shrink-0">
                 <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="20 6 9 17 4 12" /></svg>
               </div>
-              <div className="min-w-0">
-                <p className="font-semibold text-slate-800">Transfer complete</p>
-                <p className="text-sm text-slate-500 truncate mt-0.5">{completedNotice.name}</p>
-                <Link to="/transfers" className="inline-block text-xs font-medium text-primary-600 mt-2">View transfer</Link>
+              <div className="min-w-0 flex-1">
+                <p className="font-semibold text-slate-800">Transfer Complete</p>
+                
+                <div className="mt-3 bg-slate-50 rounded-lg p-3 border border-slate-100">
+                  <div className="flex justify-between text-sm mb-1.5">
+                    <span className="text-slate-500">Time</span>
+                    <span className="font-medium text-slate-700">{completedNotice.duration}</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-slate-500">Average Speed</span>
+                    <span className="font-medium text-slate-700">{completedNotice.avgSpeed}</span>
+                  </div>
+                </div>
+
+                <div className="mt-3 flex gap-2">
+                  {completedNotice.filePath && (
+                    <button 
+                      onClick={() => window.lightningshare.showFileInFolder(completedNotice.filePath!)}
+                      className="flex-1 px-3 py-1.5 bg-green-50 text-green-700 font-medium text-sm rounded-lg hover:bg-green-100 transition-colors text-center"
+                    >
+                      Open Folder
+                    </button>
+                  )}
+                  <button 
+                    onClick={() => setCompletedNotice(null)}
+                    className="flex-1 px-3 py-1.5 bg-slate-100 text-slate-600 font-medium text-sm rounded-lg hover:bg-slate-200 transition-colors text-center"
+                  >
+                    Dismiss
+                  </button>
+                </div>
               </div>
-              <button onClick={() => setCompletedNotice(null)} className="text-slate-400 hover:text-slate-600" aria-label="Dismiss notification">x</button>
             </div>
           </div>
         )}

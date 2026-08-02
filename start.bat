@@ -1,36 +1,34 @@
 @echo off
-title LightningShare
+title LightningShare Dev Server
 echo.
 echo  ==========================================
-echo   LightningShare - LAN File Transfer
+echo   LightningShare - Development Mode
 echo  ==========================================
 echo.
 
 cd /d "%~dp0"
 
-echo  [BUILD] Building the latest server and UI sources...
-call npm run build
+echo  [INSTALL] Installing dependencies...
+call npm install
 if errorlevel 1 (
-  echo  [ERROR] Build failed! The server was not started.
+  echo  [ERROR] NPM install failed!
   pause
   exit /b 1
 )
 
-echo  [START] Server starting on port 51236...
-echo  [INFO]  Browser will open automatically.
-echo  [INFO]  Share this URL with other devices on your LAN:
 echo.
-echo     http://YOUR_IP_ADDRESS:51236
+echo  [START] Starting development server...
+echo  [INFO]  Browser will open automatically.
+echo  [INFO]  Vite runs on port 5173, Server on port 51236.
 echo.
 echo  Press Ctrl+C to stop the server.
 echo  ------------------------------------------
 echo.
 
-set NODE_ENV=production
-node dist/server/server/index.js
+call npm run dev
 
 if errorlevel 1 (
   echo.
-  echo  [ERROR] Server crashed! Press any key to exit.
+  echo  [ERROR] Dev server crashed! Press any key to exit.
   pause >nul
 )

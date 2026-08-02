@@ -19,6 +19,7 @@ interface TransferState {
   pauseTransfer: (sessionId: string) => Promise<void>;
   resumeTransfer: (sessionId: string) => Promise<void>;
   retryTransfer: (sessionId: string) => Promise<string | null>;
+  clearHistory: () => Promise<void>;
 }
 
 export const useTransferStore = create<TransferState>((set, get) => ({
@@ -141,5 +142,12 @@ export const useTransferStore = create<TransferState>((set, get) => ({
     const nextSession = await window.lightningshare.getTransferSession(result.sessionId);
     if (nextSession) get().addSession(nextSession);
     return result.sessionId;
+  },
+
+  clearHistory: async () => {
+    await window.lightningshare.clearHistory();
+    set({
+      sessions: get().sessions.filter(s => !['completed', 'failed', 'cancelled', 'declined'].includes(s.status))
+    });
   },
 }));

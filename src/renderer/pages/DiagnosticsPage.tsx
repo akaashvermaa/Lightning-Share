@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { LiveSpeedGraph, GaugeBar } from '../components/SpeedGraph';
+import { LiveSpeedGraph } from '../components/SpeedGraph';
 
 interface DiagnosticsReport {
   generatedAt: string;
@@ -28,6 +28,8 @@ interface DiagnosticsReport {
 export default function DiagnosticsPage() {
   const [report, setReport] = useState<DiagnosticsReport | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [benchmarkStatus, setBenchmarkStatus] = useState<string | null>(null);
+  const [benchmarkResults, setBenchmarkResults] = useState<{ readSpeedMBps: number; writeSpeedMBps: number; networkSpeedMBps: number } | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -103,102 +105,39 @@ export default function DiagnosticsPage() {
               </div>
             )}
 
-            <div className="grid lg:grid-cols-3 gap-6">
-              {/* Process & System */}
-              <section className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
-                <h3 className="font-semibold text-slate-800 mb-5 flex items-center gap-2">
-                  <svg className="w-5 h-5 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"></rect><rect x="9" y="9" width="6" height="6"></rect><line x1="9" y1="1" x2="9" y2="4"></line><line x1="15" y1="1" x2="15" y2="4"></line><line x1="9" y1="20" x2="9" y2="23"></line><line x1="15" y1="20" x2="15" y2="23"></line><line x1="20" y1="9" x2="23" y2="9"></line><line x1="20" y1="14" x2="23" y2="14"></line><line x1="1" y1="9" x2="4" y2="9"></line><line x1="1" y1="14" x2="4" y2="14"></line></svg>
-                  System & Process
-                </h3>
-                <div className="space-y-6">
-                  <GaugeBar 
-                    label="CPU Usage (System)" 
-                    value={(report.process.cpu.system / 1000) / (report.app.uptimeSeconds * 1000 || 1)} 
-                    max={1} 
-                    color="#f59e0b" 
-                  />
-                  <GaugeBar 
-                    label="Memory (Heap)" 
-                    value={report.process.memory.heapUsed} 
-                    max={report.process.memory.heapTotal} 
-                    color="#10b981" 
-                  />
-                  <div className="grid grid-cols-2 gap-4 pt-4 border-t border-slate-100">
-                    <DiagnosticMetric label="RSS Memory" value={formatBytes(report.process.memory.rss)} />
-                    <DiagnosticMetric label="Uptime" value={formatDuration(report.app.uptimeSeconds)} />
-                    <DiagnosticMetric label="Platform" value={`${report.app.platform} ${report.app.arch}`} />
-                    <DiagnosticMetric label="Node Version" value={report.app.node} />
-                  </div>
-                </div>
-              </section>
+            <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm mb-6">
+              <h3 className="font-semibold text-slate-800 mb-2 flex items-center gap-2">
+                <svg className="w-5 h-5 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+                System Benchmark
+              </h3>
+              <p className="text-sm text-slate-500 mb-4">Test your local disk and network speed to see if they are bottlenecking your transfers.</p>
+              
+              <button 
+                onClick={async () => {
+                  setBenchmarkStatus('Running benchmark...');
+                  try {
+                    const results = await window.lightningshare.runBenchmark();
+                    setBenchmarkResults(results);
+                    setBenchmarkStatus(null);
+                  } catch (e) {
+                    setBenchmarkStatus('Failed to run benchmark');
+                  }
+                }}
+                disabled={!!benchmarkStatus}
+                className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 disabled:opacity-50 transition-colors"
+              >
+                {benchmarkStatus || 'Run Benchmark'}
+              </button>
 
-              {/* Discovery & TLS */}
-              <section className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
-                <h3 className="font-semibold text-slate-800 mb-5 flex items-center gap-2">
-                  <svg className="w-5 h-5 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"></circle><path d="M16.2 7.8l-2 6.3-6.4 2.1 2-6.3z"></path></svg>
-                  Discovery & Security
-                </h3>
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between text-sm py-2 border-b border-slate-100">
-                    <span className="text-slate-500">Service Status</span>
-                    <span className={report.discovery?.isRunning ? 'text-green-600 font-medium' : 'text-slate-400'}>
-                      {report.discovery?.isRunning ? 'Running' : 'Stopped'}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between text-sm py-2 border-b border-slate-100">
-                    <span className="text-slate-500">Known Devices</span>
-                    <span className="font-mono text-slate-700">{report.discovery?.knownDevices || 0}</span>
-                  </div>
-                  <div className="flex items-center justify-between text-sm py-2 border-b border-slate-100">
-                    <span className="text-slate-500">Active Interfaces</span>
-                    <div className="flex gap-2">
-                      {report.discovery?.interfaces && Object.entries(report.discovery.interfaces).map(([name, active]) => (
-                        <span key={name} className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ${active ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-400'}`}>
-                          {name}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="flex items-center justify-between text-sm py-2 border-b border-slate-100">
-                    <span className="text-slate-500">TLS Certificate</span>
-                    <span className={report.tls?.isLoaded ? 'text-green-600 font-medium' : 'text-red-500'}>
-                      {report.tls?.isLoaded ? 'Loaded' : 'Missing'}
-                    </span>
-                  </div>
-                  <div className="flex flex-col gap-1 text-sm py-2">
-                    <span className="text-slate-500">Device ID</span>
-                    <span className="font-mono text-xs text-slate-400 break-all">{report.discovery?.deviceId || 'Unknown'}</span>
-                  </div>
+              {benchmarkResults && (
+                <div className="grid grid-cols-3 gap-4 mt-6 pt-4 border-t border-slate-100">
+                  <DiagnosticMetric label="Disk Read" value={`${Math.round(benchmarkResults.readSpeedMBps)} MB/s`} />
+                  <DiagnosticMetric label="Disk Write" value={`${Math.round(benchmarkResults.writeSpeedMBps)} MB/s`} />
+                  <DiagnosticMetric label="Network (Loopback)" value={`${Math.round(benchmarkResults.networkSpeedMBps)} MB/s`} />
                 </div>
-              </section>
-
-              {/* Network Interfaces */}
-              <section className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm flex flex-col">
-                <h3 className="font-semibold text-slate-800 mb-5 flex items-center gap-2">
-                  <svg className="w-5 h-5 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect><rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg>
-                  Network Interfaces
-                </h3>
-                <div className="space-y-4 flex-1 overflow-y-auto pr-2" style={{ maxHeight: '250px' }}>
-                  {Object.entries(report.network).map(([name, interfaces]) => {
-                    const valid = interfaces.filter(i => !i.internal);
-                    if (valid.length === 0) return null;
-                    return (
-                      <div key={name} className="bg-slate-50 rounded-lg p-3 border border-slate-100">
-                        <p className="text-sm font-medium text-slate-700 mb-2">{name}</p>
-                        <div className="space-y-1.5">
-                          {valid.map((net, i) => (
-                            <div key={i} className="flex items-center justify-between text-xs">
-                              <span className="px-1.5 py-0.5 bg-white border border-slate-200 rounded text-slate-500 font-medium shadow-sm">{net.family}</span>
-                              <span className="font-mono text-slate-600">{net.address}</span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </section>
+              )}
             </div>
+
 
             {/* Transfer Statistics Table */}
             <section className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
@@ -276,10 +215,4 @@ function formatBytes(bytes: number): string {
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
   const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
   return `${(bytes / Math.pow(1024, index)).toFixed(index ? 1 : 0)} ${units[index]}`;
-}
-
-function formatDuration(seconds: number): string {
-  if (seconds < 60) return `${seconds}s`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
-  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
 }

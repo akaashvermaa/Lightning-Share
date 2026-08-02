@@ -6,10 +6,9 @@ export const MAX_PACKET_SIZE = 65507;
 // Transfer frames contain a small JSON header plus at most one configured chunk.
 // Rejecting larger frames prevents a peer from forcing unbounded buffer growth.
 export const MAX_TRANSFER_FRAME_SIZE = 64 * 1024 * 1024;
-export const CHUNK_SIZE_SMALL = 64 * 1024;
-export const CHUNK_SIZE_MEDIUM = 256 * 1024;
-export const CHUNK_SIZE_LARGE = 512 * 1024;
-export const CHUNK_SIZE_XLARGE = 4 * 1024 * 1024;
+export const CHUNK_SIZE_SMALL = 512 * 1024;
+export const CHUNK_SIZE_MEDIUM = 1024 * 1024;
+export const CHUNK_SIZE_LARGE = 4 * 1024 * 1024;
 export const MAX_CHUNK_RETRIES = 3;
 export const RETRY_DELAY = 1000;
 export const TRANSFER_WINDOW_SIZE = 8;
@@ -23,14 +22,12 @@ export const FILE_CHUNK_SIZES: Record<string, number> = {
   small: CHUNK_SIZE_SMALL,
   medium: CHUNK_SIZE_MEDIUM,
   large: CHUNK_SIZE_LARGE,
-  xlarge: CHUNK_SIZE_XLARGE,
 };
 
 export function getChunkSizeForFile(fileSize: number): number {
-  if (fileSize < 10 * 1024 * 1024) return CHUNK_SIZE_SMALL;
-  if (fileSize < 100 * 1024 * 1024) return CHUNK_SIZE_MEDIUM;
-  if (fileSize < 1024 * 1024 * 1024) return CHUNK_SIZE_LARGE;
-  return CHUNK_SIZE_XLARGE;
+  if (fileSize < 50 * 1024 * 1024) return CHUNK_SIZE_SMALL;
+  if (fileSize < 1024 * 1024 * 1024) return CHUNK_SIZE_MEDIUM;
+  return CHUNK_SIZE_LARGE;
 }
 
 export const COMPRESSIBLE_EXTENSIONS = [

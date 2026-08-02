@@ -4,9 +4,11 @@ interface DeviceCardProps {
   device: Device;
   onSend: () => void;
   disabled?: boolean;
+  isTrusted?: boolean;
+  onToggleTrust?: () => void;
 }
 
-export default function DeviceCard({ device, onSend, disabled }: DeviceCardProps) {
+export default function DeviceCard({ device, onSend, disabled, isTrusted, onToggleTrust }: DeviceCardProps) {
   return (
     <div className="bg-white rounded-xl border border-slate-200 p-4 hover:border-primary-300 hover:shadow-md transition-all">
       <div className="flex items-center gap-4">
@@ -18,7 +20,12 @@ export default function DeviceCard({ device, onSend, disabled }: DeviceCardProps
           </svg>
         </div>
         <div className="flex-1 min-w-0">
-          <h4 className="font-medium text-slate-900 truncate">{device.name}</h4>
+          <h4 className="font-medium text-slate-900 truncate flex items-center gap-2">
+            {device.name}
+            {isTrusted && (
+              <span className="text-[10px] font-bold text-green-700 bg-green-100 px-1.5 py-0.5 rounded-full uppercase">Trusted</span>
+            )}
+          </h4>
           <p className="text-sm text-slate-500 font-mono">{device.addresses?.[0] || 'Unknown IP'}:{device.port}</p>
         </div>
         <span className="flex items-center gap-1.5 text-sm text-success">
@@ -31,7 +38,7 @@ export default function DeviceCard({ device, onSend, disabled }: DeviceCardProps
           onClick={disabled ? undefined : onSend}
           disabled={disabled}
           title={disabled ? 'Run LightningShare on this device first to send files' : `Send files to ${device.name}`}
-          className={`flex-1 px-4 py-2.5 text-sm font-medium rounded-lg transition-colors ${
+          className={`flex-[2] px-4 py-2.5 text-sm font-medium rounded-lg transition-colors ${
             disabled
               ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
               : 'bg-primary-600 text-white hover:bg-primary-700 cursor-pointer'
@@ -39,6 +46,18 @@ export default function DeviceCard({ device, onSend, disabled }: DeviceCardProps
         >
           {disabled ? 'Run server to send' : 'Send Files'}
         </button>
+        {onToggleTrust && (
+          <button
+            onClick={onToggleTrust}
+            className={`flex-1 px-4 py-2.5 text-sm font-medium rounded-lg transition-colors border ${
+              isTrusted 
+                ? 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100' 
+                : 'bg-white text-primary-600 border-primary-200 hover:bg-primary-50'
+            }`}
+          >
+            {isTrusted ? 'Untrust' : 'Trust'}
+          </button>
+        )}
       </div>
     </div>
   );

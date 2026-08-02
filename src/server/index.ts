@@ -10,6 +10,7 @@ import log from '../shared/logger';
 import { DiscoveryService } from '../services/discovery';
 import { TransferService } from '../services/transfer';
 import { FileService } from '../services/file';
+import { BenchmarkService } from '../services/benchmark';
 import { networkMonitor } from '../services/network';
 import { uploadManager } from './upload';
 import {
@@ -28,6 +29,7 @@ const IS_DEV = process.env.NODE_ENV !== 'production';
 let discoveryService: DiscoveryService;
 let transferService: TransferService;
 let fileService: FileService;
+let benchmarkService: BenchmarkService;
 
 let settings: AppSettings = { ...DEFAULT_APP_SETTINGS, deviceName: os.hostname() };
 
@@ -35,6 +37,7 @@ const pendingFileData = new Map<string, { resolve: (p: string) => void; reject: 
 
 async function initializeServices(): Promise<void> {
   fileService = new FileService();
+  benchmarkService = new BenchmarkService();
   transferService = new TransferService(fileService);
   transferService.setBandwidthLimit(settings.bandwidthLimit || 0);
   transferService.setCompressionEnabled(settings.compressionEnabled);
@@ -597,9 +600,25 @@ function createApp(): express.Express {
     res.json({ success: true });
   });
 
+  app.post('/api/benchmark/run', async (req, res) => {
+    try {
+      const downloadPath = settings.downloadPath || path.join(os.homedir(), 'Downloads');
+      const results = await benchmarkService.runBenchmark(downloadPath);
+      res.json(results);
+    } catch (err) {
+      log.error('Benchmark error:', err);
+      res.status(500).json({ error: 'Failed to run benchmark' });
+    }
+  });
+
   app.post('/api/transfer/resume', async (req, res) => {
     const { sessionId } = req.body;
     await transferService.resumeSession(sessionId);
+    res.json({ success: true });
+  });
+
+  app.post('/api/transfer/clear-history', (req, res) => {
+    transferService.clearHistory();
     res.json({ success: true });
   });
 
@@ -739,7 +758,15 @@ function setupServiceEventBridge(): void {
   });
 
   transferService.on('incoming-transfer', (transfer: IncomingTransfer) => {
-    broadcastWS('incoming-transfer', transfer);
+    if (settings.autoAcceptFromTrusted && settings.trustedDevices?.includes(transfer.deviceId)) {
+      log.info(`[Auto-Accept] Accepting transfer ${transfer.sessionId} from trusted device ${transfer.deviceId}`);
+      const downloadPath = settings.downloadPath || path.join(os.homedir(), 'Downloads');
+      fs.promises.mkdir(downloadPath, { recursive: true })
+        .then(() => transferService.acceptSession(transfer.sessionId, downloadPath))
+        .catch(err => log.error('[Auto-Accept] Failed:', err));
+    } else {
+      broadcastWS('incoming-transfer', transfer);
+    }
   });
 }
 
