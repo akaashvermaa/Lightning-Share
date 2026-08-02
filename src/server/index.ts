@@ -252,23 +252,29 @@ function setupStreamWSServer(): WebSocketServer {
             readonly: entry.readonly,
           };
           completedFiles.push(fileInfo);
-          log.debug(`[StreamWS] File completed: ${entry.relativePath} → ${entry.tempPath}`);
+          log.info(`[StreamWS] File completed: ${entry.relativePath} (${entry.bytesReceived} bytes) → ${entry.tempPath}`);
           return;
         }
 
         if (msg.type === 'manifest-done') {
+          log.info(`[StreamWS] manifest-done: deviceId=${deviceId} sessionId=${sessionId} completedFiles=${completedFiles.length}`);
+
           if (!deviceId || !sessionId || completedFiles.length === 0) {
-            sendJSON({ type: 'error', error: 'No files received' });
+            const reason = !deviceId ? 'missing deviceId' : !sessionId ? 'missing sessionId' : 'no files received (completedFiles empty)';
+            log.error(`[StreamWS] manifest-done REJECTED: ${reason}`);
+            sendJSON({ type: 'error', error: `No files received (${reason})` });
             return;
           }
 
           const device = discoveryService.getDevices().find((d) => d.id === deviceId);
           if (!device) {
+            log.error(`[StreamWS] manifest-done REJECTED: device ${deviceId} not found in discovered list (${discoveryService.getDevices().map(d => d.id).join(', ')})`);
             sendJSON({ type: 'error', error: `Device ${deviceId} not found` });
             return;
           }
 
           try {
+            log.info(`[StreamWS] Creating session for ${device.name} with ${completedFiles.length} files`);
             const session = await transferService.createSession(device, completedFiles, 'sending');
             if (!session) {
               sendJSON({ type: 'error', error: 'Failed to create transfer session' });
