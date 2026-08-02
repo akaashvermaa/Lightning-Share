@@ -457,8 +457,6 @@ function createApp(): express.Express {
     res.json(valid);
   });
 
-  });
-
   // --- File selection (returns FileInfo from already-uploaded files) ---
   app.post('/api/select-files', (req, res) => {
     const files = req.body as FileInfo[];
