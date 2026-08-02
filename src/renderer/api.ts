@@ -489,10 +489,12 @@ export const lightningshareAPI = {
           const msg = JSON.parse(event.data);
 
           if (msg.type === 'ready') {
+            // Connection is alive — clear the handshake timeout so it doesn't
+            // kill large file streams that take longer than 10 seconds.
+            clearTimeout(timeout);
             // Start streaming files but do not resolve yet
             startStreamingSession(streamWs, msg.sessionId, files).catch((err) => {
               console.error('[StreamTransfer] Streaming error:', err);
-              clearTimeout(timeout);
               resolve({ success: false, error: 'Streaming to backend failed' });
             });
           } else if (msg.type === 'transfer-started') {
