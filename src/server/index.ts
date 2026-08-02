@@ -394,7 +394,9 @@ function createApp(): express.Express {
   });
 
   app.get('/api/devices', (_req, res) => {
-    res.json(discoveryService.getDevices());
+    const devices = discoveryService.getDevices();
+    log.info('/api/devices called. Size: ' + devices.length + ' Content: ' + JSON.stringify(devices));
+    res.json(devices);
   });
 
   app.get('/api/local-ip', (_req, res) => {

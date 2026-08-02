@@ -17,7 +17,8 @@ import mdns from 'multicast-dns';
 const DATA_DIR = path.join(os.homedir(), '.lightningshare');
 const DEVICE_ID_FILE = path.join(DATA_DIR, 'device-id');
 const MDNS_SERVICE = '_lightningshare._tcp.local';
-const REFRESH_INTERVAL = 60000;
+const REFRESH_INTERVAL = 2000;
+
 
 export class DiscoveryService extends EventEmitter {
   private deviceId: string;
