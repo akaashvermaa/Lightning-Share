@@ -489,12 +489,17 @@ export const lightningshareAPI = {
           const msg = JSON.parse(event.data);
 
           if (msg.type === 'ready') {
-            clearTimeout(timeout);
-            resolve({ success: true, sessionId: msg.sessionId });
-            // Stream all files without blocking the resolve
+            // Start streaming files but do not resolve yet
             startStreamingSession(streamWs, msg.sessionId, files).catch((err) => {
               console.error('[StreamTransfer] Streaming error:', err);
+              clearTimeout(timeout);
+              resolve({ success: false, error: 'Streaming to backend failed' });
             });
+          } else if (msg.type === 'transfer-started') {
+            // Backend has completed streaming and created the session
+            clearTimeout(timeout);
+            resolve({ success: true, sessionId: msg.sessionId });
+            streamWs.close();
           } else if (msg.type === 'error') {
             clearTimeout(timeout);
             resolve({ success: false, error: msg.error });

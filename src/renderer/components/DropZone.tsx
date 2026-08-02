@@ -27,14 +27,23 @@ export default function DropZone({ onFilesSelected, onProgress }: DropZoneProps)
     setIsUploading(true);
     setError(null);
     try {
-      const uploaded = await window.lightningshare.uploadFiles(files, onProgress);
-      if (uploaded.length > 0) onFilesSelected(uploaded);
+      const fileInfos: FileInfo[] = files.map(f => ({
+        id: crypto.randomUUID(),
+        name: f.name,
+        path: f.name,
+        size: f.size,
+        isDirectory: false,
+        mimeType: f.type || 'application/octet-stream',
+        mtime: f.lastModified,
+        fileRef: f,
+      }));
+      onFilesSelected(fileInfos);
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : 'Could not add those files');
     } finally {
       setIsUploading(false);
     }
-  }, [onFilesSelected, onProgress]);
+  }, [onFilesSelected]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();

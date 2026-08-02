@@ -12,7 +12,6 @@ import { TransferService } from '../services/transfer';
 import { FileService } from '../services/file';
 import { BenchmarkService } from '../services/benchmark';
 import { networkMonitor } from '../services/network';
-import { uploadManager } from './upload';
 import {
   Device,
   FileInfo,
@@ -32,8 +31,6 @@ let fileService: FileService;
 let benchmarkService: BenchmarkService;
 
 let settings: AppSettings = { ...DEFAULT_APP_SETTINGS, deviceName: os.hostname() };
-
-const pendingFileData = new Map<string, { resolve: (p: string) => void; reject: (e: Error) => void }>();
 
 async function initializeServices(): Promise<void> {
   fileService = new FileService();
@@ -90,21 +87,6 @@ function setupWSServer(): WebSocketServer {
 
   wss.on('connection', (ws) => {
     log.info('WebSocket client connected');
-
-    ws.on('message', async (raw, isBinary) => {
-      if (isBinary) {
-        return;
-      }
-
-      try {
-        const msg = JSON.parse(raw.toString());
-        if (msg.type === 'upload-chunk') {
-          await handleWSUploadChunk(ws, msg);
-        }
-      } catch (err) {
-        log.error('WS message error:', err);
-      }
-    });
 
     ws.on('close', () => {
       log.info('WebSocket client disconnected');
@@ -183,7 +165,11 @@ function setupStreamWSServer(): WebSocketServer {
           if (!entry.writeStream) {
             const tmpDir = path.join(os.tmpdir(), 'lightningshare-stream');
             await fs.promises.mkdir(tmpDir, { recursive: true });
-            entry.tempPath = path.join(tmpDir, `${fileId}${path.extname(entry.relativePath)}`);
+            
+            const safeFileId = fileId.replace(/[^a-zA-Z0-9-]/g, '_');
+            const safeExt = path.extname(entry.relativePath).replace(/[^a-zA-Z0-9.-]/g, '_');
+            entry.tempPath = path.join(tmpDir, `${safeFileId}${safeExt}`);
+            
             entry.writeStream = fs.createWriteStream(entry.tempPath, { flags: 'a' });
           }
 
@@ -244,7 +230,11 @@ function setupStreamWSServer(): WebSocketServer {
           if (!entry.tempPath && !entry.isDirectory) {
             const tmpDir = path.join(os.tmpdir(), 'lightningshare-stream');
             await fs.promises.mkdir(tmpDir, { recursive: true });
-            entry.tempPath = path.join(tmpDir, `${msg.fileId}${path.extname(entry.relativePath)}`);
+            
+            const safeFileId = msg.fileId.replace(/[^a-zA-Z0-9-]/g, '_');
+            const safeExt = path.extname(entry.relativePath).replace(/[^a-zA-Z0-9.-]/g, '_');
+            entry.tempPath = path.join(tmpDir, `${safeFileId}${safeExt}`);
+            
             await fs.promises.writeFile(entry.tempPath, Buffer.alloc(0));
           }
 
@@ -311,18 +301,6 @@ function setupStreamWSServer(): WebSocketServer {
   });
 
   return streamWss;
-}
-
-
-async function handleWSUploadChunk(ws: WebSocket, msg: any): Promise<void> {
-  const { uploadId, chunkIndex, data, isLast } = msg;
-  log.debug(`Upload chunk ${chunkIndex} for ${uploadId}, size=${data?.length || 0}`);
-  if (isLast) {
-    const pending = pendingFileData.get(uploadId);
-    if (pending) {
-      pendingFileData.delete(uploadId);
-    }
-  }
 }
 
 function createApp(): express.Express {
@@ -394,9 +372,7 @@ function createApp(): express.Express {
   });
 
   app.get('/api/devices', (_req, res) => {
-    const devices = discoveryService.getDevices();
-    log.info('/api/devices called. Size: ' + devices.length + ' Content: ' + JSON.stringify(devices));
-    res.json(devices);
+    res.json(discoveryService.getDevices());
   });
 
   app.get('/api/local-ip', (_req, res) => {
@@ -481,43 +457,6 @@ function createApp(): express.Express {
     res.json(valid);
   });
 
-  // --- File upload ---
-  app.post('/api/upload', async (req, res) => {
-    const encodedFileName = req.headers['x-file-name'] as string;
-    let fileName = encodedFileName;
-    try {
-      fileName = decodeURIComponent(encodedFileName || '');
-    } catch {
-      // Keep the raw header for compatibility with older clients.
-    }
-    const fileSize = parseInt(req.headers['x-file-size'] as string, 10);
-    const fileId = (req.headers['x-file-id'] as string) || uuidv4();
-    const mimeType = (req.headers['x-mime-type'] as string) || 'application/octet-stream';
-
-    if (!fileName) {
-      return res.status(400).json({ error: 'Missing X-File-Name header' });
-    }
-
-    const tempPath = uploadManager.getTempPath(fileId, fileName);
-
-    try {
-      await uploadManager.saveUpload(fileId, fileName, req);
-      log.info(`File uploaded: ${fileName} (${fileSize} bytes) -> ${tempPath}`);
-
-      const fileInfo: FileInfo = {
-        id: fileId,
-        name: fileName,
-        path: tempPath,
-        size: fileSize,
-        isDirectory: false,
-        mimeType,
-      };
-
-      res.json(fileInfo);
-    } catch (err) {
-      log.error('Upload failed:', err);
-      res.status(500).json({ error: 'Upload failed' });
-    }
   });
 
   // --- File selection (returns FileInfo from already-uploaded files) ---
