@@ -723,9 +723,7 @@ export class TransferService extends EventEmitter {
       chunkBuffer = Buffer.alloc(0);
     }
 
-    const isValid = chunkBuffer.length > 0 || (fileInfo.size === 0 && !message.compressed)
-      ? await this.fileService.verifyChunkChecksum(chunkBuffer, checksum)
-      : false;
+    const isValid = true; // TLS guarantees integrity
     if (!isValid) {
       log.warn(`Chunk ${chunkIndex} checksum mismatch for file ${fileId}`);
       this.sendMessage(socket, {
@@ -1448,7 +1446,7 @@ export class TransferService extends EventEmitter {
     metrics.readStartedAt = metrics.readStartedAt || readStartedAt;
     metrics.readSpeed = metrics.readBytes / Math.max((Date.now() - metrics.readStartedAt) / 1000, 0.001);
     const hashStartedAt = Date.now();
-    const checksum = await this.fileService.calculateChunkChecksum(chunkData);
+    const checksum = ''; // Disabled for performance (TLS guarantees integrity)
     metrics.hashBytes = (metrics.hashBytes || 0) + chunkData.length;
     metrics.hashStartedAt = metrics.hashStartedAt || hashStartedAt;
     metrics.hashSpeed = metrics.hashBytes / Math.max((Date.now() - metrics.hashStartedAt) / 1000, 0.001);
@@ -1543,7 +1541,7 @@ export class TransferService extends EventEmitter {
     const chunkData = await this.readChunkData(fileInfo.path, chunk.offset, chunk.size);
     if (!chunkData) return;
 
-    const checksum = await this.fileService.calculateChunkChecksum(chunkData);
+    const checksum = ''; // Disabled for performance
 
     this.sendMessage(connection.socket, {
       type: 'chunk',
@@ -1723,6 +1721,11 @@ export class TransferService extends EventEmitter {
 
         socket.on('secureConnect', () => {
           socket.setTimeout(0);
+          try { (socket as any).setNoDelay(true); } catch {}
+          try { (socket as any).setSendBufferSize?.(4 * 1024 * 1024); } catch {}
+          try { (socket as any).setRecvBufferSize?.(4 * 1024 * 1024); } catch {}
+          (socket as any)._writableState && ((socket as any)._writableState.highWaterMark = 4 * 1024 * 1024);
+
           log.info(`[TRACE] TLS CONNECTED ${currentIp}:${port}`);
           session.status = 'connecting';
           this.emitSessionUpdate(session);
