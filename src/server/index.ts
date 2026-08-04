@@ -647,19 +647,61 @@ function createApp(): express.Express {
 
 function serializeSession(session: TransferSession): any {
   const internal = session as any;
+
+  // IMPORTANT: Never spread the live session object (`...session`).
+  // The session accumulates non-serialisable Node objects at runtime:
+  // Timeout (ackFlushTimer), Map (activeFiles, chunkSentAt, writeQueues),
+  // FileHandle, Socket, etc. JSON.stringify on any of those throws
+  // "Converting circular structure to JSON", which crashes broadcastWS
+  // and destroys the TLS socket — producing ECONNRESET on the sender.
+  // We whitelist only safe plain-scalar fields here.
   return {
-    ...session,
+    // Identity
+    id: session.id,
+    deviceId: session.deviceId,
+    deviceName: session.deviceName,
+    deviceIp: session.deviceIp,
+    direction: session.direction,
+
+    // Progress
+    status: session.status,
+    totalSize: session.totalSize,
+    transferredBytes: session.transferredBytes,
+    speed: session.speed,
+    remainingTime: session.remainingTime,
+    lastAcknowledgedByte: session.lastAcknowledgedByte,
+
+    // Timing
+    startedAt: session.startedAt,
+    completedAt: session.completedAt,
+
+    // Error
+    error: session.error,
+
+    // Files (FileInfo contains only plain scalars)
+    files: session.files,
+
+    // Serialise Set<number> → number[]
     acknowledgedChunks: Array.from(session.acknowledgedChunks),
+
+    // Speed history (plain objects)
     speedHistory: session.speedHistory,
+
+    // Metrics (plain scalars if present)
+    metrics: session.metrics ?? null,
+
+    // Per-file resume state (serialise nested Sets)
     fileResume: internal.fileResume
-      ? Object.fromEntries(Object.entries(internal.fileResume).map(([fileId, state]: [string, any]) => [
-        fileId,
-        {
-          acknowledgedChunks: Array.from(state.acknowledgedChunks || []),
-          contiguousBytes: state.contiguousBytes || 0,
-          completed: Boolean(state.completed),
-        },
-      ]))
+      ? Object.fromEntries(
+          Object.entries(internal.fileResume).map(([fileId, state]: [string, any]) => [
+            fileId,
+            {
+              acknowledgedChunks: Array.from(state.acknowledgedChunks || []),
+              contiguousBytes: state.contiguousBytes || 0,
+              completed: Boolean(state.completed),
+            },
+          ])
+        )
       : undefined,
   };
 }
