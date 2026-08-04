@@ -405,7 +405,7 @@ export class TransferService extends EventEmitter {
         resolve();
       };
       const onError = (err: Error) => {
-        this.server?.removeListener('listening', onListening);
+        (this.server as any)?.removeListener?.('listening', onListening);
         reject(err);
       };
 
