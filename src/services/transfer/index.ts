@@ -27,6 +27,7 @@ import {
   MAX_TRANSFER_WINDOW_SIZE,
   MAX_TRANSFER_FRAME_SIZE,
   TCP_KEEPALIVE,
+  CHUNK_SIZE_MEDIUM,
   shouldCompress,
   getChunkSizeForFile,
 } from '../../shared/constants';
@@ -413,12 +414,13 @@ export class TransferService extends EventEmitter {
     log.info(`[TRACE] ENTER handleConnection ${remoteAddress}`);
     log.info(`[TRACE] INCOMING TLS CONNECTION ${remoteAddress}`);
     socket.setKeepAlive(true, TCP_KEEPALIVE);
-    // Socket Buffer Optimization: tune kernel send/recv buffers and set a
-    // generous stream highWaterMark so Node doesn't fragment large writes.
+    // Socket Buffer Optimization: request larger kernel send/recv buffers so
+    // large-file WiFi transfers can pipeline without stalling.
+    // NOTE: Windows and macOS may clamp these values — treat them as hints.
     try { (socket as any).setNoDelay(true); } catch {}
-    try { (socket as any).setSendBufferSize?.(4 * 1024 * 1024); } catch {}
-    try { (socket as any).setRecvBufferSize?.(4 * 1024 * 1024); } catch {}
-    (socket as any)._writableState && ((socket as any)._writableState.highWaterMark = 4 * 1024 * 1024);
+    try { (socket as any).setSendBufferSize?.(16 * 1024 * 1024); } catch {}
+    try { (socket as any).setRecvBufferSize?.(16 * 1024 * 1024); } catch {}
+    (socket as any)._writableState && ((socket as any)._writableState.highWaterMark = 16 * 1024 * 1024);
 
     let buffer = Buffer.alloc(0);
 
@@ -1173,8 +1175,29 @@ export class TransferService extends EventEmitter {
     const key = `${message.fileId}:${message.chunkIndex}`;
     metrics.chunkSentAt?.delete(key);
     metrics.socketWritableLength = socket.writableLength;
-    // Window adjustment based on RTT is disabled until we implement true network-only PING/PONG.
-    // Hardcoded window size (16) will act as the ceiling.
+
+    // ---------------------------------------------------------------------------
+    // AIMD adaptive window: Additive Increase / Multiplicative Decrease.
+    //   - Queue drained (< 1 chunk): network is keeping up → +1 window slot
+    //   - Queue building (> 4 chunks): network is behind → halve window
+    // We derive the estimated chunk size from the first active file if possible.
+    // ---------------------------------------------------------------------------
+    const activeFilesMap = (session as any).activeFiles;
+    let estChunkSize = CHUNK_SIZE_MEDIUM; // 2 MB fallback
+    if (activeFilesMap) {
+      for (const af of activeFilesMap.values()) {
+        if (af.chunks.length > 0) { estChunkSize = af.chunks[0].size; break; }
+      }
+    }
+    const queued = socket.writableLength;
+    if (!metrics.windowSize) metrics.windowSize = TRANSFER_WINDOW_SIZE;
+    if (queued < estChunkSize) {
+      // Network is draining fast — additive increase
+      metrics.windowSize = Math.min(metrics.windowSize + 1, MAX_TRANSFER_WINDOW_SIZE);
+    } else if (queued > estChunkSize * 4) {
+      // Queue building up — multiplicative decrease (halve, floor at min)
+      metrics.windowSize = Math.max(Math.floor(metrics.windowSize / 2), MIN_TRANSFER_WINDOW_SIZE);
+    }
 
     const now = Date.now();
     const elapsedMs = now - (metrics.metricsLastAt || now);
@@ -1185,10 +1208,10 @@ export class TransferService extends EventEmitter {
         ? session.transferredBytes / ((now - session.startedAt) / 1000)
         : 0;
       log.info(
-        `[METRICS] session=${session.id} current=${Math.round(currentSpeed)}B/s ` +
-        `average=${Math.round(averageSpeed)}B/s rtt=${Math.round(metrics.rttMs || 0)}ms ` +
-        `window=${metrics.windowSize} inFlight=${metrics.inFlightChunks?.size || 0} ` +
-        `queued=${socket.writableLength}B acked=${session.acknowledgedChunks.size}`,
+        `[METRICS] session=${session.id} current=${Math.round(currentSpeed / 1024 / 1024)}MB/s ` +
+        `average=${Math.round(averageSpeed / 1024 / 1024)}MB/s ` +
+        `window=${metrics.windowSize} queued=${Math.round(queued / 1024)}KB ` +
+        `chunkSize=${Math.round(estChunkSize / 1024)}KB acked=${session.acknowledgedChunks.size}`,
       );
       metrics.metricsLastAt = now;
       metrics.metricsLastBytes = session.transferredBytes;
@@ -1200,7 +1223,7 @@ export class TransferService extends EventEmitter {
     (session as any).activeFiles = active;
 
     const maxParallel = 4;
-    const sizeLimit = 10 * 1024 * 1024; // 10 MB
+    const sizeLimit = 50 * 1024 * 1024; // 50 MB — files above this get dedicated window slots
 
     let numActive = active.size;
 
@@ -1319,8 +1342,8 @@ export class TransferService extends EventEmitter {
     const activeFilesMap = (session as any).activeFiles;
     if (!activeFilesMap) return;
 
-    // Hardcode Window Size to 16
-    const readAheadLimit = Math.max(8, 16 * 2);
+    // Read 64 chunks ahead (was 32) so disk I/O never starves the send window.
+    const readAheadLimit = 64;
     let totalPrefetched = 0;
 
     for (const af of activeFilesMap.values()) {
@@ -1343,11 +1366,34 @@ export class TransferService extends EventEmitter {
        }
     }
 
-    // Hardcode Window Size to 16 to prevent the broken adaptive engine from throttling transfers
-    (session as any).windowSize = 16;
+    // Use the AIMD-adjusted window size (initialized to TRANSFER_WINDOW_SIZE=8,
+    // grows toward MAX_TRANSFER_WINDOW_SIZE=32 via recordChunkAck).
+    const windowSize: number = (session as any).windowSize ?? TRANSFER_WINDOW_SIZE;
+
+    // ---------------------------------------------------------------------------
+    // Backpressure gate: if the socket's outgoing buffer is already larger than
+    // 2× the estimated chunk size, the network is not draining fast enough.
+    // Stop filling now — the next ACK will call fillSendWindow again once the
+    // pipe has had a chance to clear. This directly fixes the 'queue keeps
+    // growing to 48 MB' issue seen in the diagnostics.
+    // ---------------------------------------------------------------------------
+    const activeFilesMap = (session as any).activeFiles;
+    let estChunkSize = CHUNK_SIZE_MEDIUM; // 2 MB fallback
+    if (activeFilesMap) {
+      for (const af of activeFilesMap.values()) {
+        if (af.chunks.length > 0) { estChunkSize = af.chunks[0].size; break; }
+      }
+    }
+    if (socket.writableLength > estChunkSize * 2) {
+      log.debug(
+        `[BACKPRESSURE] session=${session.id} writableLength=${Math.round(socket.writableLength / 1024)}KB ` +
+        `> threshold=${Math.round(estChunkSize * 2 / 1024)}KB — skipping fill`,
+      );
+      return;
+    }
     
     while (
-      totalInFlight < 16 &&
+      totalInFlight < windowSize &&
       session.status !== 'completed' &&
       session.status !== 'failed' &&
       session.status !== 'cancelled'

@@ -278,6 +278,30 @@ async function* scanDirectory(
 }
 
 // ---------------------------------------------------------------------------
+// drainWebSocket: yield until the WebSocket's send buffer has drained below
+// the high-water mark. This prevents the browser from buffering gigabytes of
+// data in memory when streaming large files, which caused OOM crashes.
+// ---------------------------------------------------------------------------
+// 4 MB chunks — fewer chunk-headers per gigabyte; localhost round-trip is ~0ms.
+// 32 MB high-water / 8 MB resume: large enough that drainWebSocket rarely
+// blocks on localhost, small enough to avoid uncapped memory growth.
+const WS_CHUNK_SIZE  =  4 * 1024 * 1024;  // 4 MB per chunk (browser → local server)
+const WS_HIGH_WATER  = 32 * 1024 * 1024;  // pause when >32 MB buffered
+const WS_RESUME      =  8 * 1024 * 1024;  // resume when < 8 MB buffered
+
+function drainWebSocket(ws: WebSocket): Promise<void> {
+  if (ws.bufferedAmount <= WS_HIGH_WATER) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    const poll = () => {
+      if (ws.readyState !== WebSocket.OPEN) { resolve(); return; }
+      if (ws.bufferedAmount <= WS_RESUME) { resolve(); return; }
+      setTimeout(poll, 50);
+    };
+    setTimeout(poll, 50);
+  });
+}
+
+// ---------------------------------------------------------------------------
 // startStreamingSession: streams all files from a directory handle over the
 // existing ws-stream WebSocket to the backend.
 // ---------------------------------------------------------------------------
@@ -287,7 +311,7 @@ async function startStreamingSession(
   files: FileInfo[],
   onProgress?: (sentBytes: number, totalBytes: number, fileName: string) => void,
 ): Promise<void> {
-  const CHUNK_SIZE = 512 * 1024; // 512 KB
+  const CHUNK_SIZE = WS_CHUNK_SIZE;
 
   // Pre-compute total bytes so we can report accurate progress.
   // Folders via FileSystemDirectoryHandle have size=0 in the FileInfo,
@@ -330,6 +354,7 @@ async function startStreamingSession(
           if (file.size > 0) {
             let offset = 0;
             while (offset < file.size) {
+              await drainWebSocket(ws);
               const slice = file.slice(offset, offset + CHUNK_SIZE);
               const buffer = await slice.arrayBuffer();
 
@@ -381,6 +406,7 @@ async function startStreamingSession(
             // Stream raw binary chunks
             let offset = 0;
             while (offset < file.size) {
+              await drainWebSocket(ws);
               const slice = file.slice(offset, offset + CHUNK_SIZE);
               const buffer = await slice.arrayBuffer();
 
@@ -428,6 +454,7 @@ async function startStreamingSession(
       if (file.size > 0) {
         let offset = 0;
         while (offset < file.size) {
+          await drainWebSocket(ws);
           const slice = file.slice(offset, offset + CHUNK_SIZE);
           const buffer = await slice.arrayBuffer();
 
@@ -444,6 +471,8 @@ async function startStreamingSession(
           combined.set(new Uint8Array(buffer), header.byteLength);
 
           ws.send(combined.buffer);
+          sentBytes += buffer.byteLength;
+          onProgress?.(sentBytes, totalBytes, normalizedPath);
           offset += buffer.byteLength;
         }
       }
