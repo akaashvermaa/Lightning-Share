@@ -723,6 +723,7 @@ export class TransferService extends EventEmitter {
     }
 
     const { fileId, chunkIndex, offset, data, checksum } = message;
+    const chunkReceiveTime = Date.now();
     log.debug(`[RECV_CHUNK] chunk ${chunkIndex} for file ${fileId}, offset=${offset}, dataLen=${data?.length || data?.data?.length || 0}`);
 
     // Binary-only protocol: data is always a raw Buffer from decodeFrame.
@@ -736,9 +737,14 @@ export class TransferService extends EventEmitter {
 
     let chunkBuffer: Buffer;
     try {
+      const t_inflateStart = Date.now();
       chunkBuffer = message.compressed
         ? await inflateRawAsync(wireBuffer)
         : wireBuffer;
+      const inflateMs = Date.now() - t_inflateStart;
+      if (inflateMs > 5 && chunkIndex % 50 === 0) {
+        log.info(`[RECV_INFLATE] chunk=${chunkIndex} inflateMs=${inflateMs} compressed=${wireBuffer.length} -> ${chunkBuffer.length} bytes`);
+      }
     } catch {
       chunkBuffer = Buffer.alloc(0);
     }
@@ -791,6 +797,7 @@ export class TransferService extends EventEmitter {
     if (!resumeState.acknowledgedChunks.has(chunkIndex)) {
       const t0 = Date.now();
       const writeHandle = await this.createWriteHandle(session, fileId);
+      const createHandleMs = Date.now() - t0;
       if (writeHandle) {
         // Write Buffer Queue: chain onto the per-file queue so writes are
         // sequential. We do NOT await here — the ACK is sent immediately after
@@ -799,17 +806,29 @@ export class TransferService extends EventEmitter {
         // by resume (sender re-sends from the last contiguous acknowledged byte).
         const queueKey = `${session.id}:${fileId}`;
         const prevWrite = this.writeQueues.get(queueKey) ?? Promise.resolve();
-        const nextWrite = prevWrite.then(() =>
-          writeHandle.write(chunkBuffer, 0, chunkBuffer.length, offset).then(() => {
-            const writeMs = Math.max(Date.now() - t0, 1);
+        const nextWrite = prevWrite.then(() => {
+          const t_writeStart = Date.now();
+          return writeHandle.write(chunkBuffer, 0, chunkBuffer.length, offset).then(() => {
+            const writeMs = Date.now() - t_writeStart;
+            const queueWaitMs = t_writeStart - t0;
             const instWriteSpeed = chunkBuffer.length / (writeMs / 1000);
             const metrics = session as any;
             metrics.writeSpeed = metrics.writeSpeed
               ? Math.round(metrics.writeSpeed * 0.8 + instWriteSpeed * 0.2)
               : instWriteSpeed;
-            log.debug(`[WRITE_PERF] chunk=${chunkIndex} file=${fileId} writeMs=${writeMs} instSpeed=${Math.round(instWriteSpeed / 1024 / 1024)}MB/s avgSpeed=${Math.round(metrics.writeSpeed / 1024 / 1024)}MB/s`);
-          })
-        ).catch((err) => {
+            metrics.receivedChunkCount = (metrics.receivedChunkCount || 0) + 1;
+            // Log every 50 chunks or for the first few
+            if (metrics.receivedChunkCount % 50 === 1 || chunkIndex < 5) {
+              log.info(
+                `[RECV_WRITE_DIAG] Chunk #${chunkIndex} ` +
+                `createHandleMs=${createHandleMs} queueWaitMs=${queueWaitMs} diskWriteMs=${writeMs} ` +
+                `writeSpeed=${Math.round(instWriteSpeed / 1024 / 1024)}MB/s ` +
+                `avgWriteSpeed=${Math.round((metrics.writeSpeed || 0) / 1024 / 1024)}MB/s ` +
+                `fileId=${fileId} session=${session.id}`,
+              );
+            }
+          });
+        }).catch((err) => {
           log.error(`[WRITE_QUEUE] Write error for chunk ${chunkIndex} of ${fileId}: ${err}`);
         });
         this.writeQueues.set(queueKey, nextWrite);
@@ -835,10 +854,11 @@ export class TransferService extends EventEmitter {
     session.acknowledgedChunks = resumeState.acknowledgedChunks;
 
     // Batched ACK policy: flush ACK frame every 8 chunks, every 16 MB, on the last chunk,
-    // or via a 50ms trailing flush timer. Reduces protocol chatter by ~90%.
+    // or via a 10ms trailing flush timer. Reduces protocol chatter by ~90%.
     const isLastChunk = chunkIndex === fileChunks.length - 1;
     (session as any).pendingAckCount = ((session as any).pendingAckCount || 0) + 1;
     (session as any).pendingAckBytes = ((session as any).pendingAckBytes || 0) + chunkBuffer.length;
+    const ackReceivedAt = Date.now();
 
     const shouldFlushAck = isLastChunk ||
       (session as any).pendingAckCount >= 8 ||
@@ -851,6 +871,9 @@ export class TransferService extends EventEmitter {
         clearTimeout((session as any).ackFlushTimer);
         (session as any).ackFlushTimer = null;
       }
+      const ackFlushDelay = 0;
+      log.debug(`[ACK_FLUSH] IMMEDIATE chunk=${chunkIndex} delay=${ackFlushDelay}ms reason=${isLastChunk ? 'lastChunk' : 'count/bytes'} session=${session.id}`);
+      const ackSendStart = Date.now();
       this.sendMessage(socket, {
         type: 'ack',
         sessionId: message.sessionId,
@@ -859,14 +882,26 @@ export class TransferService extends EventEmitter {
         acknowledgedByte: contiguousBytes,
         checksum,
         valid: true,
+      }).then(() => {
+        const ackSendMs = Date.now() - ackSendStart;
+        if (ackSendMs > 5) {
+          log.info(`[ACK_SEND_DIAG] chunk=${chunkIndex} ackSendMs=${ackSendMs} socketQueued=${Math.round(socket.writableLength / 1024)}KB`);
+        }
       });
     } else if (!(session as any).ackFlushTimer) {
       // 10ms trailing timer: on a 5GHz Wi-Fi link (RTT ~4ms) waiting 50ms would
       // stall the sender for 12 RTTs. 10ms lets us batch without adding visible latency.
       (session as any).ackFlushTimer = setTimeout(() => {
         (session as any).ackFlushTimer = null;
+        const pendingCount = (session as any).pendingAckCount || 0;
+        const pendingBytes = (session as any).pendingAckBytes || 0;
         (session as any).pendingAckCount = 0;
         (session as any).pendingAckBytes = 0;
+        const ackFlushDelay = Date.now() - ackReceivedAt;
+        log.debug(`[ACK_FLUSH] TIMER chunk=${chunkIndex} delay=${ackFlushDelay}ms batched=${pendingCount} chunks/${Math.round(pendingBytes / 1024)}KB session=${session.id}`);
+        if (ackFlushDelay > 20) {
+          log.warn(`[ACK_FLUSH] EVENT LOOP LAG detected: expected 10ms timer, actual ${ackFlushDelay}ms — receiver event loop may be blocked`);
+        }
         this.sendMessage(socket, {
           type: 'ack',
           sessionId: message.sessionId,
@@ -880,6 +915,18 @@ export class TransferService extends EventEmitter {
     }
 
     this.updateProgress(session);
+
+    // Log total receiver-side processing time for this chunk.
+    const chunkProcessMs = Date.now() - chunkReceiveTime;
+    if (chunkIndex % 50 === 0 || chunkIndex < 5) {
+      log.info(
+        `[RECV_DIAG] Chunk #${chunkIndex} totalProcessMs=${chunkProcessMs} ` +
+        `inflateMs=${message.compressed ? '~' : '0'} ` +
+        `socketQueued=${Math.round(socket.writableLength / 1024)}KB ` +
+        `writeQueueKey=${session.id}:${fileId} ` +
+        `session=${session.id}`,
+      );
+    }
   }
 
   private async handleAck(socket: net.Socket, message: any): Promise<void> {
@@ -1252,6 +1299,19 @@ export class TransferService extends EventEmitter {
       metrics.chunkSentAt.delete(key);
       const sampleRtt = Date.now() - sentAt;
       metrics.rttMs = metrics.rttMs ? Math.round(metrics.rttMs * 0.8 + sampleRtt * 0.2) : sampleRtt;
+
+      // Detailed ACK log every 50 chunks — shows per-chunk RTT and socket state.
+      metrics.ackLogCount = (metrics.ackLogCount || 0) + 1;
+      if (metrics.ackLogCount % 50 === 1 || message.chunkIndex < 5) {
+        log.info(
+          `[ACK_DIAG] Chunk #${message.chunkIndex} ` +
+          `sentAt=${sentAt} ackAt=${Date.now()} rtt=${sampleRtt}ms ` +
+          `smoothedRtt=${metrics.rttMs}ms ` +
+          `socketQueued=${Math.round(socket.writableLength / 1024)}KB ` +
+          `window=${metrics.windowSize ?? TRANSFER_WINDOW_SIZE} ` +
+          `fileId=${message.fileId} session=${session.id}`,
+        );
+      }
     }
     metrics.socketWritableLength = socket.writableLength;
 
@@ -1270,12 +1330,21 @@ export class TransferService extends EventEmitter {
     }
     const queued = socket.writableLength;
     if (!metrics.windowSize) metrics.windowSize = TRANSFER_WINDOW_SIZE;
+    const prevWindow = metrics.windowSize;
     if (queued < estChunkSize * 2) {
       // Network is draining fast — additive increase up to MAX_TRANSFER_WINDOW_SIZE (64)
       metrics.windowSize = Math.min(metrics.windowSize + 1, MAX_TRANSFER_WINDOW_SIZE);
     } else if (queued > estChunkSize * 8) {
       // Queue building up — smooth multiplicative decrease (reduce by 15%, floor at MIN_TRANSFER_WINDOW_SIZE=8)
       metrics.windowSize = Math.max(Math.floor(metrics.windowSize * 0.85), MIN_TRANSFER_WINDOW_SIZE);
+    }
+    if (metrics.windowSize !== prevWindow) {
+      const direction = metrics.windowSize > prevWindow ? 'UP' : 'DOWN';
+      log.info(
+        `[AIMD] Window ${direction}: ${prevWindow} → ${metrics.windowSize} ` +
+        `queued=${Math.round(queued / 1024)}KB threshold=${Math.round(estChunkSize * 2 / 1024)}KB/${Math.round(estChunkSize * 8 / 1024)}KB ` +
+        `rtt=${metrics.rttMs || '?'}ms session=${session.id}`,
+      );
     }
 
     const now = Date.now();
@@ -1592,6 +1661,7 @@ export class TransferService extends EventEmitter {
 
     await this.consumeBandwidth(chunkData.length);
 
+    const t_socketWriteStart = Date.now();
     await this.sendMessage(socket, {
       type: 'chunk',
       sessionId: session.id,
@@ -1603,20 +1673,47 @@ export class TransferService extends EventEmitter {
       uncompressedLength: chunkData.length,
       checksum,
     });
+    const socketWriteMs = Date.now() - t_socketWriteStart;
 
     // Record RTT start AFTER sendMessage returns — this is the moment the kernel
     // accepted the bytes into the TCP send buffer. Measuring before sendMessage
     // would include disk read + compression + socket drain time, producing false
     // RTTs of 100-800ms instead of the true 4-8ms network round-trip time.
     if (!metrics.chunkSentAt) metrics.chunkSentAt = new Map();
-    metrics.chunkSentAt.set(`${fileInfo.id}:${unacknowledged.index}`, Date.now());
+    const sentAtKey = `${fileInfo.id}:${unacknowledged.index}`;
+    const sentAtTime = Date.now();
+    metrics.chunkSentAt.set(sentAtKey, sentAtTime);
 
-    const socketWriteMs = Date.now() - t_sendStart;
-    log.debug(
-      `[CHUNK_PERF] chunk=${unacknowledged.index} size=${Math.round(chunkData.length / 1024)}KB ` +
-      `diskRead=${diskReadMs}ms comp=${compMs}ms socketWrite=${socketWriteMs}ms ` +
-      `queued=${Math.round(socket.writableLength / 1024)}KB`,
-    );
+    // Per-chunk detailed timing log — identifies exactly where time is spent.
+    // Logs at INFO level every 50 chunks so it doesn't flood the console.
+    metrics.chunkLogCount = (metrics.chunkLogCount || 0) + 1;
+    if (metrics.chunkLogCount % 50 === 1 || unacknowledged.index < 5) {
+      log.info(
+        `[CHUNK_DIAG] Chunk #${unacknowledged.index} ` +
+        `readMs=${diskReadMs} compMs=${compMs} socketWriteMs=${socketWriteMs} ` +
+        `wireSize=${Math.round(wireData.length / 1024)}KB ` +
+        `socketQueued=${Math.round(socket.writableLength / 1024)}KB ` +
+        `window=${metrics.windowSize ?? TRANSFER_WINDOW_SIZE} ` +
+        `rtt=${metrics.rttMs ?? '?'}ms ` +
+        `sentAt=${sentAtTime} session=${session.id}`,
+      );
+    }
+
+    // Summary log every 100 chunks — the single-line dashboard.
+    if (metrics.chunkLogCount % 100 === 0) {
+      const elapsed = (Date.now() - session.startedAt) / 1000;
+      const avgSpeed = elapsed > 0 ? session.transferredBytes / elapsed : 0;
+      log.info(
+        `[CHUNK_SUMMARY] after ${metrics.chunkLogCount} chunks: ` +
+        `avgSpeed=${Math.round(avgSpeed / 1024)}KB/s ` +
+        `window=${metrics.windowSize ?? TRANSFER_WINDOW_SIZE} ` +
+        `rtt=${metrics.rttMs ?? '?'}ms ` +
+        `socketQueued=${Math.round(socket.writableLength / 1024)}KB ` +
+        `writeQueueDepth=${(session as any).pendingAckCount || 0} ` +
+        `ackedChunks=${session.acknowledgedChunks.size} ` +
+        `compressed=${Math.round((metrics.compressedBytes || 0) / 1024)}KB/${Math.round((metrics.uncompressedBytes || 0) / 1024)}KB`,
+      );
+    }
 
     if (chunkData.byteOffset === 0 && chunkData.byteLength === chunkData.buffer.byteLength) {
       this.bufferPool.release(chunkData);
@@ -1638,9 +1735,10 @@ export class TransferService extends EventEmitter {
     session.transferredBytes += chunkData.length;
 
     const elapsed = (Date.now() - session.startedAt) / 1000;
+    const MIN_ETA_BYTES = 10 * 1024 * 1024; // 10 MB
     if (elapsed > 0) {
       session.speed = session.transferredBytes / elapsed;
-      if (session.speed > 0) {
+      if (session.speed > 0 && session.transferredBytes >= MIN_ETA_BYTES) {
         session.remainingTime = (session.totalSize - session.transferredBytes) / session.speed;
       }
     }
@@ -1764,11 +1862,13 @@ export class TransferService extends EventEmitter {
     }
 
     // Compute speed and ETA for the receiving side.
+    // Only compute ETA after at least 10 MB transferred to avoid absurd early estimates.
     const now = Date.now();
     const elapsed = (now - session.startedAt) / 1000;
+    const MIN_ETA_BYTES = 10 * 1024 * 1024; // 10 MB
     if (elapsed > 0 && session.transferredBytes > 0) {
       session.speed = session.transferredBytes / elapsed;
-      if (session.speed > 0 && session.totalSize > session.transferredBytes) {
+      if (session.speed > 0 && session.totalSize > session.transferredBytes && session.transferredBytes >= MIN_ETA_BYTES) {
         session.remainingTime = (session.totalSize - session.transferredBytes) / session.speed;
       } else {
         session.remainingTime = 0;
