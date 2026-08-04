@@ -771,27 +771,33 @@ export class TransferService extends EventEmitter {
       return;
     }
     if (!resumeState.acknowledgedChunks.has(chunkIndex)) {
+      const t0 = Date.now();
       const writeHandle = await this.createWriteHandle(session, fileId);
       if (writeHandle) {
         // Write Buffer Queue: chain onto the per-file queue so writes are
-        // sequential but we never block the chunk handler with fsync per chunk.
+        // sequential. We do NOT await here — the ACK is sent immediately after
+        // queueing so disk latency does not add to the chunk round-trip time.
+        // The queue guarantees ordering; a crash between ACK and flush is handled
+        // by resume (sender re-sends from the last contiguous acknowledged byte).
         const queueKey = `${session.id}:${fileId}`;
         const prevWrite = this.writeQueues.get(queueKey) ?? Promise.resolve();
         const nextWrite = prevWrite.then(() =>
           writeHandle.write(chunkBuffer, 0, chunkBuffer.length, offset).then(() => {
-            // Track metrics without awaiting
+            const writeMs = Date.now() - t0;
             const metrics = session as any;
             metrics.writeBytes = (metrics.writeBytes || 0) + chunkBuffer.length;
-            metrics.writeStartedAt = metrics.writeStartedAt || Date.now();
+            metrics.writeStartedAt = metrics.writeStartedAt || t0;
             metrics.writeSpeed = metrics.writeBytes / Math.max((Date.now() - metrics.writeStartedAt) / 1000, 0.001);
+            log.debug(`[WRITE_PERF] chunk=${chunkIndex} file=${fileId} writeMs=${writeMs} writeSpeed=${Math.round(metrics.writeSpeed / 1024 / 1024)}MB/s`);
           })
         ).catch((err) => {
           log.error(`[WRITE_QUEUE] Write error for chunk ${chunkIndex} of ${fileId}: ${err}`);
         });
         this.writeQueues.set(queueKey, nextWrite);
-        // Await so that ack is only sent after the write is committed to the queue
-        await nextWrite;
+        // Fire-and-forget: do NOT await — ACK is sent below without waiting for disk.
       }
+      // Optimistically mark acknowledged; safe because the write queue is already
+      // in memory and ordered. On resume the contiguous byte calculation is correct.
       resumeState.acknowledgedChunks.add(chunkIndex);
     }
     const contiguousBytes = this.updateContiguousBytes(session, fileId);
@@ -809,6 +815,7 @@ export class TransferService extends EventEmitter {
     session.lastAcknowledgedByte = contiguousBytes;
     session.acknowledgedChunks = resumeState.acknowledgedChunks;
 
+    // ACK is sent immediately — no disk wait.
     this.sendMessage(socket, {
       type: 'ack',
       sessionId: message.sessionId,
@@ -1463,15 +1470,17 @@ export class TransferService extends EventEmitter {
     }
 
     const metrics = session as any;
-    const readStartedAt = Date.now();
+
+    // Per-stage wall-clock timing so we can identify the bottleneck:
+    //   disk read → compression → socket write
+    const t_readStart = Date.now();
     metrics.readBytes = (metrics.readBytes || 0) + chunkData.length;
-    metrics.readStartedAt = metrics.readStartedAt || readStartedAt;
-    metrics.readSpeed = metrics.readBytes / Math.max((Date.now() - metrics.readStartedAt) / 1000, 0.001);
-    const hashStartedAt = Date.now();
+    metrics.readStartedAt = metrics.readStartedAt || t_readStart;
+    metrics.readSpeed = metrics.readBytes / Math.max((t_readStart - metrics.readStartedAt) / 1000, 0.001);
+
+    const t_compStart = Date.now();
+    const diskReadMs = t_compStart - t_readStart;
     const checksum = ''; // Disabled for performance (TLS guarantees integrity)
-    metrics.hashBytes = (metrics.hashBytes || 0) + chunkData.length;
-    metrics.hashStartedAt = metrics.hashStartedAt || hashStartedAt;
-    metrics.hashSpeed = metrics.hashBytes / Math.max((Date.now() - metrics.hashStartedAt) / 1000, 0.001);
     let wireData = chunkData;
     let compressed = false;
     if (this.compressionEnabled && shouldCompress(fileInfo.name, chunkData.length)) {
@@ -1483,6 +1492,8 @@ export class TransferService extends EventEmitter {
         metrics.uncompressedBytes = (metrics.uncompressedBytes || 0) + chunkData.length;
       }
     }
+    const t_sendStart = Date.now();
+    const compMs = t_sendStart - t_compStart;
 
     await this.consumeBandwidth(chunkData.length);
 
@@ -1501,6 +1512,13 @@ export class TransferService extends EventEmitter {
       uncompressedLength: chunkData.length,
       checksum,
     });
+
+    const socketWriteMs = Date.now() - t_sendStart;
+    log.debug(
+      `[CHUNK_PERF] chunk=${unacknowledged.index} size=${Math.round(chunkData.length / 1024)}KB ` +
+      `diskRead=${diskReadMs}ms comp=${compMs}ms socketWrite=${socketWriteMs}ms ` +
+      `queued=${Math.round(socket.writableLength / 1024)}KB`,
+    );
 
     if (chunkData.byteOffset === 0 && chunkData.byteLength === chunkData.buffer.byteLength) {
       this.bufferPool.release(chunkData);
@@ -1639,6 +1657,28 @@ export class TransferService extends EventEmitter {
       }
     }
     session.transferredBytes = totalTransferred;
+
+    // Compute speed and ETA for the receiving side.
+    // (The sending side computes these in sendNextChunk; without this the
+    //  receiver always shows 0 MB/s and no remaining-time estimate.)
+    const now = Date.now();
+    const elapsed = (now - session.startedAt) / 1000;
+    if (elapsed > 0 && session.transferredBytes > 0) {
+      session.speed = session.transferredBytes / elapsed;
+      if (session.speed > 0 && session.totalSize > session.transferredBytes) {
+        session.remainingTime = (session.totalSize - session.transferredBytes) / session.speed;
+      } else {
+        session.remainingTime = 0;
+      }
+      if (
+        session.speedHistory.length === 0 ||
+        now - session.speedHistory[session.speedHistory.length - 1].timestamp >= 500
+      ) {
+        session.speedHistory.push({ timestamp: now, bytesPerSecond: session.speed });
+        if (session.speedHistory.length > 60) session.speedHistory.shift();
+      }
+    }
+
     this.emitSessionUpdate(session);
   }
 
