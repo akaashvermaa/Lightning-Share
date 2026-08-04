@@ -95,7 +95,7 @@ export default function DiagnosticsPage() {
                       color={t.direction === 'sending' ? '#3b82f6' : '#a855f7'}
                     />
                     <div className="grid grid-cols-4 gap-4 mt-6 pt-4 border-t border-slate-100 bg-slate-50 -mx-5 -mb-5 p-4 rounded-b-xl">
-                      <DiagnosticMetric label="RTT" value={`${Math.round(t.rttMs)} ms`} />
+                      <DiagnosticMetric label="Chunk ACK" value={`${Math.round(t.rttMs)} ms`} />
                       <DiagnosticMetric label="Window Size" value={`${t.windowSize}`} />
                       <DiagnosticMetric label="TCP Queued" value={formatBytes(t.queuedBytes)} />
                       <DiagnosticMetric label="Retries" value={`${t.retryCount}`} />
@@ -155,7 +155,7 @@ export default function DiagnosticsPage() {
                         <th className="text-left px-5 py-3">Session</th>
                         <th className="text-left px-5 py-3">Status</th>
                         <th className="text-left px-5 py-3">Bottleneck</th>
-                        <th className="text-right px-5 py-3">RTT</th>
+                        <th className="text-right px-5 py-3">Chunk ACK</th>
                         <th className="text-right px-5 py-3">Window</th>
                         <th className="text-right px-5 py-3">In Flight</th>
                         <th className="text-right px-5 py-3">Retries</th>

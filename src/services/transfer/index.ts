@@ -1361,13 +1361,34 @@ export class TransferService extends EventEmitter {
         `window=${metrics.windowSize} rtt=${metrics.rttMs || 0}ms queued=${Math.round(queued / 1024)}KB ` +
         `chunkSize=${Math.round(estChunkSize / 1024)}KB acked=${session.acknowledgedChunks.size}`,
       );
+
+      // Populate session.metrics so the UI can display real-time diagnostics.
+      let totalInFlight = 0;
+      const afm = (session as any).activeFiles;
+      if (afm instanceof Map) {
+        for (const af of afm.values()) totalInFlight += af.inFlight?.size || 0;
+      }
+      session.metrics = {
+        currentSpeed,
+        averageSpeed,
+        rttMs: metrics.rttMs || 0,
+        windowSize: metrics.windowSize || TRANSFER_WINDOW_SIZE,
+        inFlightChunks: totalInFlight,
+        queuedBytes: queued,
+        acknowledgedChunks: session.acknowledgedChunks.size,
+      };
+
       metrics.metricsLastAt = now;
       metrics.metricsLastBytes = session.transferredBytes;
     }
   }
 
   private updateActiveFiles(session: TransferSession) {
-    const active = (session as any).activeFiles || new Map();
+    let active = (session as any).activeFiles;
+    // Guard: persisted sessions may deserialize activeFiles as a plain {} instead of a Map.
+    if (!(active instanceof Map)) {
+      active = new Map();
+    }
     (session as any).activeFiles = active;
 
     const maxParallel = 4;
@@ -1661,6 +1682,14 @@ export class TransferService extends EventEmitter {
 
     await this.consumeBandwidth(chunkData.length);
 
+    // Record RTT timestamp BEFORE sendMessage.  Setting it after would include
+    // the socket drain wait (up to hundreds of ms when the kernel buffer is
+    // full), producing fake "RTT" values that are really chunk-send-time + RTT.
+    if (!metrics.chunkSentAt) metrics.chunkSentAt = new Map();
+    const sentAtKey = `${fileInfo.id}:${unacknowledged.index}`;
+    const sentAtTime = Date.now();
+    metrics.chunkSentAt.set(sentAtKey, sentAtTime);
+
     const t_socketWriteStart = Date.now();
     await this.sendMessage(socket, {
       type: 'chunk',
@@ -1674,15 +1703,6 @@ export class TransferService extends EventEmitter {
       checksum,
     });
     const socketWriteMs = Date.now() - t_socketWriteStart;
-
-    // Record RTT start AFTER sendMessage returns — this is the moment the kernel
-    // accepted the bytes into the TCP send buffer. Measuring before sendMessage
-    // would include disk read + compression + socket drain time, producing false
-    // RTTs of 100-800ms instead of the true 4-8ms network round-trip time.
-    if (!metrics.chunkSentAt) metrics.chunkSentAt = new Map();
-    const sentAtKey = `${fileInfo.id}:${unacknowledged.index}`;
-    const sentAtTime = Date.now();
-    metrics.chunkSentAt.set(sentAtKey, sentAtTime);
 
     // Per-chunk detailed timing log — identifies exactly where time is spent.
     // Logs at INFO level every 50 chunks so it doesn't flood the console.

@@ -352,7 +352,7 @@ function TransferCard({ session }: { session: any }) {
       {session.metrics && isActive && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-3 text-xs">
           <Metric label="Current" value={formatSpeed(session.metrics.currentSpeed)} />
-          <Metric label="RTT" value={`${Math.round(session.metrics.rttMs)} ms`} />
+          <Metric label="Chunk ACK" value={`${Math.round(session.metrics.rttMs)} ms`} />
           <Metric label="Window" value={`${session.metrics.windowSize} chunks`} />
           <Metric label="Queued" value={formatBytes(session.metrics.queuedBytes)} />
         </div>
