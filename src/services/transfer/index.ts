@@ -1014,7 +1014,14 @@ export class TransferService extends EventEmitter {
         this.pendingTransfers.set(message.sessionId, { transfer: pending, socket });
         this.emit('incoming-transfer', pending);
         log.info(`Reattached persisted pending transfer ${message.sessionId}`);
+        return;
       }
+      log.warn(`[RECV_RESUME] Unknown or expired session ${message.sessionId} — sending error response to prevent reconnect loop`);
+      this.sendMessage(socket, {
+        type: 'error',
+        sessionId: message.sessionId,
+        error: 'Session not found on receiver',
+      });
       return;
     }
 
@@ -1159,9 +1166,16 @@ export class TransferService extends EventEmitter {
     const session = this.sessions.get(message.sessionId);
     if (!session) return;
 
+    log.error(`[TRANSFER_ERROR] Received error for session ${session.id}: ${message.error}`);
     session.status = 'failed';
-    session.error = message.error;
-    this.emit('session-error', session.id, message.error);
+    session.error = message.error || 'Transfer failed';
+
+    const reconnectState = this.reconnects.get(session.id);
+    if (reconnectState?.timer) clearTimeout(reconnectState.timer);
+    this.reconnects.delete(session.id);
+
+    this.clearSessionConnections(session.id);
+    this.emitSessionUpdate(session);
   }
 
   private async createWriteHandle(session: TransferSession, fileId: string): Promise<fs.promises.FileHandle | null> {
@@ -1448,6 +1462,10 @@ export class TransferService extends EventEmitter {
       totalInFlight < windowSize &&
       session.status === 'transferring'
     ) {
+      if (socket.destroyed || !socket.writable) {
+        log.debug(`[FILL_WINDOW] Socket destroyed or unwritable — breaking fill loop for session ${session.id}`);
+        break;
+      }
       const previousInFlight = totalInFlight;
       await this.sendNextChunk(session, socket);
       this.prefetchChunks(session);
@@ -1496,6 +1514,12 @@ export class TransferService extends EventEmitter {
               fileId: af.file.id,
               checksum: fileChecksum,
             });
+            // Close and remove the read FileHandle for this completed file immediately
+            const fd = this.fileHandles.get(af.file.path);
+            if (fd) {
+              void fd.close().catch(() => {});
+              this.fileHandles.delete(af.file.path);
+            }
             this.emitSessionUpdate(session);
             return;
           }

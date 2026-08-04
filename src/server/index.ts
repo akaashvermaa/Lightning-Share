@@ -226,7 +226,10 @@ function setupStreamWSServer(): WebSocketServer {
           // Flush & close write stream
           await new Promise<void>((resolve) => {
             if (entry.writeStream) {
-              entry.writeStream.end(resolve);
+              entry.writeStream.end(() => {
+                entry.writeStream = null;
+                resolve();
+              });
             } else {
               resolve();
             }
