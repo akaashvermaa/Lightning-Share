@@ -154,6 +154,7 @@ export default function DiagnosticsPage() {
                       <tr>
                         <th className="text-left px-5 py-3">Session</th>
                         <th className="text-left px-5 py-3">Status</th>
+                        <th className="text-left px-5 py-3">Bottleneck</th>
                         <th className="text-right px-5 py-3">RTT</th>
                         <th className="text-right px-5 py-3">Window</th>
                         <th className="text-right px-5 py-3">In Flight</th>
@@ -162,7 +163,7 @@ export default function DiagnosticsPage() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {report.transfers.map((t) => (
+                      {report.transfers.map((t: any) => (
                         <tr key={t.id} className="hover:bg-slate-50 transition-colors">
                           <td className="px-5 py-4 text-slate-700">
                             <span className="font-medium">{t.deviceName}</span>
@@ -178,6 +179,9 @@ export default function DiagnosticsPage() {
                               {t.status}
                             </span>
                           </td>
+                          <td className="px-5 py-4 text-xs font-mono text-slate-600">
+                            {t.currentBottleneck || 'Idle'}
+                          </td>
                           <td className="px-5 py-4 text-right font-mono text-slate-600">{Math.round(t.rttMs)} ms</td>
                           <td className="px-5 py-4 text-right font-mono text-slate-600">{t.windowSize}</td>
                           <td className="px-5 py-4 text-right font-mono text-slate-600">{t.inFlightChunks}</td>
@@ -185,7 +189,7 @@ export default function DiagnosticsPage() {
                             <span className={t.retryCount > 0 ? 'text-amber-600 font-bold' : ''}>{t.retryCount}</span>
                           </td>
                           <td className="px-5 py-4 text-right font-mono text-slate-600">
-                            {t.compressionRatio < 1 ? `${Math.round(t.compressionRatio * 100)}%` : 'off'}
+                            {t.compressionRatio < 1 ? `${Math.round(t.compressionRatio * 100)}%` : 'None'}
                           </td>
                         </tr>
                       ))}
