@@ -569,8 +569,26 @@ export const lightningshareAPI = {
     files: FileInfo[],
     onProgress?: (sentBytes: number, totalBytes: number, fileName: string) => void,
   ): Promise<{ success: boolean; sessionId?: string; error?: string }> => {
-    return new Promise((resolve) => {
-      const wsUrl = `ws://${location.host}/ws-stream`;
+    return new Promise(async (resolve) => {
+      // ---------------------------------------------------------------------------
+      // CRITICAL: Connect ws-stream DIRECTLY to the backend, NOT through the Vite
+      // dev proxy. Vite's http-proxy buffers every WebSocket frame in its Node.js
+      // heap with no size cap. Uploading 6+ GB of data exhausts Vite's heap and
+      // crashes the process (Windows exit code 0xC0000409 / OOM).
+      // We fetch the backend's real host:port from /api/server-info, then open
+      // the WebSocket straight to it, bypassing the proxy entirely.
+      // ---------------------------------------------------------------------------
+      let backendWsBase: string;
+      try {
+        const info = await fetch('/api/server-info').then(r => r.json());
+        // info.url is like "http://192.168.x.x:51236" – convert to ws://
+        const backendUrl = new URL(info.url);
+        backendWsBase = `ws://${location.hostname}:${backendUrl.port}`;
+      } catch {
+        // Fallback: connect via the proxy (may fail on very large transfers)
+        backendWsBase = `ws://${location.host}`;
+      }
+      const wsUrl = `${backendWsBase}/ws-stream`;
       const streamWs = new WebSocket(wsUrl);
       streamWs.binaryType = 'arraybuffer';
 
