@@ -24,12 +24,12 @@ export const MAX_CHUNK_RETRIES = 3;
 export const RETRY_DELAY = 1000;
 
 // ---------------------------------------------------------------------------
-// Window sizing: adaptive AIMD starts at 8 and grows toward 32.
-// 32 × 4 MB = 128 MB max in-flight — reasonable for a 300 Mbps WiFi pipe.
+// Window sizing: adaptive AIMD starts at 12 and grows toward 64.
+// 64 × 4 MB = 256 MB max in-flight bandwidth-delay product for high-speed Wi-Fi.
 // ---------------------------------------------------------------------------
-export const TRANSFER_WINDOW_SIZE     =  8;  // conservative start
-export const MIN_TRANSFER_WINDOW_SIZE =  4;
-export const MAX_TRANSFER_WINDOW_SIZE = 32;
+export const TRANSFER_WINDOW_SIZE     = 12;  // generous start
+export const MIN_TRANSFER_WINDOW_SIZE =  8;  // floor prevents window collapsing to 4
+export const MAX_TRANSFER_WINDOW_SIZE = 64;  // headroom for 100+ MB/s pipes
 
 export const TCP_KEEPALIVE = 30000;
 export const COMPRESSION_THRESHOLD = 1024 * 1024;

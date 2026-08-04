@@ -378,6 +378,18 @@ export class TransferService extends EventEmitter {
       cert: fs.readFileSync(certInfo.certPath),
       rejectUnauthorized: false,
       handshakeTimeout: 10000,
+      // Pin to fast hardware-accelerated cipher suites.
+      // TLS 1.3 suites (preferred): AES-GCM uses AES-NI; ChaCha20 is fast on systems without it.
+      // TLS 1.2 fallback included for older Node builds.
+      minVersion: 'TLSv1.2' as const,
+      ciphers: [
+        'TLS_AES_256_GCM_SHA384',
+        'TLS_AES_128_GCM_SHA256',
+        'TLS_CHACHA20_POLY1305_SHA256',
+        'ECDHE-RSA-AES256-GCM-SHA384',
+        'ECDHE-RSA-AES128-GCM-SHA256',
+        'ECDHE-RSA-CHACHA20-POLY1305',
+      ].join(':'),
     };
 
     this.server = tls.createServer(options, (socket) => {
@@ -822,15 +834,15 @@ export class TransferService extends EventEmitter {
     session.lastAcknowledgedByte = contiguousBytes;
     session.acknowledgedChunks = resumeState.acknowledgedChunks;
 
-    // Batched ACK policy: flush ACK frame every 4 chunks, every 4 MB, on the last chunk,
-    // or via a 50ms trailing flush timer. Reduces protocol chatter by ~75%.
+    // Batched ACK policy: flush ACK frame every 8 chunks, every 16 MB, on the last chunk,
+    // or via a 50ms trailing flush timer. Reduces protocol chatter by ~90%.
     const isLastChunk = chunkIndex === fileChunks.length - 1;
     (session as any).pendingAckCount = ((session as any).pendingAckCount || 0) + 1;
     (session as any).pendingAckBytes = ((session as any).pendingAckBytes || 0) + chunkBuffer.length;
 
     const shouldFlushAck = isLastChunk ||
-      (session as any).pendingAckCount >= 4 ||
-      (session as any).pendingAckBytes >= 4 * 1024 * 1024;
+      (session as any).pendingAckCount >= 8 ||
+      (session as any).pendingAckBytes >= 16 * 1024 * 1024;
 
     if (shouldFlushAck) {
       (session as any).pendingAckCount = 0;
@@ -849,6 +861,8 @@ export class TransferService extends EventEmitter {
         valid: true,
       });
     } else if (!(session as any).ackFlushTimer) {
+      // 10ms trailing timer: on a 5GHz Wi-Fi link (RTT ~4ms) waiting 50ms would
+      // stall the sender for 12 RTTs. 10ms lets us batch without adding visible latency.
       (session as any).ackFlushTimer = setTimeout(() => {
         (session as any).ackFlushTimer = null;
         (session as any).pendingAckCount = 0;
@@ -862,7 +876,7 @@ export class TransferService extends EventEmitter {
           checksum,
           valid: true,
         });
-      }, 50);
+      }, 10);
     }
 
     this.updateProgress(session);
@@ -1256,12 +1270,12 @@ export class TransferService extends EventEmitter {
     }
     const queued = socket.writableLength;
     if (!metrics.windowSize) metrics.windowSize = TRANSFER_WINDOW_SIZE;
-    if (queued < estChunkSize) {
-      // Network is draining fast — additive increase
+    if (queued < estChunkSize * 2) {
+      // Network is draining fast — additive increase up to MAX_TRANSFER_WINDOW_SIZE (64)
       metrics.windowSize = Math.min(metrics.windowSize + 1, MAX_TRANSFER_WINDOW_SIZE);
-    } else if (queued > estChunkSize * 4) {
-      // Queue building up — multiplicative decrease (halve, floor at min)
-      metrics.windowSize = Math.max(Math.floor(metrics.windowSize / 2), MIN_TRANSFER_WINDOW_SIZE);
+    } else if (queued > estChunkSize * 8) {
+      // Queue building up — smooth multiplicative decrease (reduce by 15%, floor at MIN_TRANSFER_WINDOW_SIZE=8)
+      metrics.windowSize = Math.max(Math.floor(metrics.windowSize * 0.85), MIN_TRANSFER_WINDOW_SIZE);
     }
 
     const now = Date.now();
@@ -1337,6 +1351,14 @@ export class TransferService extends EventEmitter {
     socket: net.Socket,
     isResume = false,
   ): Promise<void> {
+    // Sort files: large first so the Wi-Fi pipe stays saturated, then medium,
+    // then small. Directories (size=0) go last. This replaces the original
+    // alphabetical/insertion order and has the most impact for codebases with
+    // thousands of small files alongside a few large binaries.
+    if (!isResume) {
+      session.files.sort((a, b) => b.size - a.size);
+    }
+
     this.initializeTransferMetrics(session, !isResume);
     this.updateActiveFiles(session);
 
@@ -1407,8 +1429,11 @@ export class TransferService extends EventEmitter {
     const activeFilesMap = (session as any).activeFiles;
     if (!activeFilesMap) return;
 
-    // Read 64 chunks ahead (was 32) so disk I/O never starves the send window.
-    const readAheadLimit = 64;
+    // Adaptive read-ahead: prefetch 3× the current AIMD window so disk I/O
+    // always stays well ahead of network dispatch as the window scales toward 64.
+    // (min 32 chunks = 64 MB, max 192 = 384 MB with 2 MB chunks)
+    const currentWindow: number = (session as any).windowSize ?? TRANSFER_WINDOW_SIZE;
+    const readAheadLimit = Math.max(32, currentWindow * 3);
     let totalPrefetched = 0;
 
     for (const af of activeFilesMap.values()) {
@@ -1450,10 +1475,10 @@ export class TransferService extends EventEmitter {
         if (af.chunks.length > 0) { estChunkSize = af.chunks[0].size; break; }
       }
     }
-    if (socket.writableLength > estChunkSize * 4) {
+    if (socket.writableLength > estChunkSize * 8) {
       log.debug(
         `[BACKPRESSURE] session=${session.id} writableLength=${Math.round(socket.writableLength / 1024)}KB ` +
-        `> threshold=${Math.round(estChunkSize * 4 / 1024)}KB — skipping fill`,
+        `> threshold=${Math.round(estChunkSize * 8 / 1024)}KB — skipping fill`,
       );
       return;
     }
@@ -1567,9 +1592,6 @@ export class TransferService extends EventEmitter {
 
     await this.consumeBandwidth(chunkData.length);
 
-    if (!metrics.chunkSentAt) metrics.chunkSentAt = new Map();
-    metrics.chunkSentAt.set(`${fileInfo.id}:${unacknowledged.index}`, Date.now());
-
     await this.sendMessage(socket, {
       type: 'chunk',
       sessionId: session.id,
@@ -1581,6 +1603,13 @@ export class TransferService extends EventEmitter {
       uncompressedLength: chunkData.length,
       checksum,
     });
+
+    // Record RTT start AFTER sendMessage returns — this is the moment the kernel
+    // accepted the bytes into the TCP send buffer. Measuring before sendMessage
+    // would include disk read + compression + socket drain time, producing false
+    // RTTs of 100-800ms instead of the true 4-8ms network round-trip time.
+    if (!metrics.chunkSentAt) metrics.chunkSentAt = new Map();
+    metrics.chunkSentAt.set(`${fileInfo.id}:${unacknowledged.index}`, Date.now());
 
     const socketWriteMs = Date.now() - t_sendStart;
     log.debug(
