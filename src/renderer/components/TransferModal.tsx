@@ -3,6 +3,14 @@ import { FileInfo } from '../../shared/types';
 import { UploadProgress } from '../api';
 import DropZone from './DropZone';
 
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
 interface TransferModalProps {
   deviceId: string;
   onClose: () => void;
@@ -16,6 +24,7 @@ export default function TransferModal({ deviceId, onClose }: TransferModalProps)
   const [uploadError, setUploadError] = useState<string | null>(null);
   const lastUploadRender = useRef(0);
   const [sendStatus, setSendStatus] = useState<'idle' | 'uploading' | 'sent' | 'error'>('idle');
+  const [streamProgress, setStreamProgress] = useState<{ sent: number; total: number; fileName: string } | null>(null);
 
   const handleSelectFolder = async () => {
     setUploadError(null);
@@ -41,8 +50,19 @@ export default function TransferModal({ deviceId, onClose }: TransferModalProps)
     if (files.length === 0) return;
     setIsSending(true);
     setSendStatus('uploading');
+    setStreamProgress(null);
     try {
-      const result = await window.lightningshare.startTransfer(deviceId, files);
+      const result = await window.lightningshare.startTransfer(
+        deviceId,
+        files,
+        (sentBytes, totalBytes, fileName) => {
+          const now = Date.now();
+          if (now - lastUploadRender.current >= 100 || sentBytes >= totalBytes) {
+            lastUploadRender.current = now;
+            setStreamProgress({ sent: sentBytes, total: totalBytes, fileName });
+          }
+        },
+      );
       if (result.success) {
         setSendStatus('sent');
         setTimeout(() => {
@@ -111,16 +131,47 @@ export default function TransferModal({ deviceId, onClose }: TransferModalProps)
               </p>
             </div>
           ) : sendStatus === 'uploading' ? (
-            <div className="flex flex-col items-center py-8">
-              <div className="w-16 h-16 bg-blue-50 rounded-full flex items-center justify-center mb-4">
-                <svg className="w-8 h-8 text-blue-500 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-                </svg>
-              </div>
-              <h3 className="text-lg font-medium text-slate-900 mb-1">Connecting...</h3>
-              <p className="text-sm text-slate-500">
-                Sending transfer request to device...
-              </p>
+            <div className="flex flex-col items-center py-6 w-full">
+              {streamProgress && streamProgress.total > 0 ? (
+                <>
+                  <div className="w-full mb-1 flex items-center justify-between">
+                    <span className="text-sm font-semibold text-slate-700">Uploading to server…</span>
+                    <span className="text-sm font-bold text-blue-600">
+                      {Math.round((streamProgress.sent / streamProgress.total) * 100)}%
+                    </span>
+                  </div>
+                  <div
+                    className="w-full h-3 bg-slate-100 rounded-full overflow-hidden mb-3"
+                    role="progressbar"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={Math.round((streamProgress.sent / streamProgress.total) * 100)}
+                  >
+                    <div
+                      className="h-full rounded-full bg-gradient-to-r from-blue-500 to-indigo-500 transition-[width] duration-150"
+                      style={{ width: `${Math.min((streamProgress.sent / streamProgress.total) * 100, 100)}%` }}
+                    />
+                  </div>
+                  <div className="w-full flex items-center justify-between text-xs text-slate-500">
+                    <span className="truncate pr-3 max-w-[70%]" title={streamProgress.fileName}>
+                      {streamProgress.fileName.split('/').pop()}
+                    </span>
+                    <span className="shrink-0 font-mono">
+                      {formatBytes(streamProgress.sent)} / {formatBytes(streamProgress.total)}
+                    </span>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="w-16 h-16 bg-blue-50 rounded-full flex items-center justify-center mb-4">
+                    <svg className="w-8 h-8 text-blue-500 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                    </svg>
+                  </div>
+                  <h3 className="text-lg font-medium text-slate-900 mb-1">Connecting…</h3>
+                  <p className="text-sm text-slate-500">Sending transfer request to device…</p>
+                </>
+              )}
             </div>
           ) : isUploading ? (
             <div className="py-8">
@@ -263,12 +314,4 @@ export default function TransferModal({ deviceId, onClose }: TransferModalProps)
       </div>
     </div>
   );
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }

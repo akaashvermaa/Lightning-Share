@@ -285,60 +285,129 @@ async function startStreamingSession(
   ws: WebSocket,
   sessionId: string,
   files: FileInfo[],
+  onProgress?: (sentBytes: number, totalBytes: number, fileName: string) => void,
 ): Promise<void> {
   const CHUNK_SIZE = 512 * 1024; // 512 KB
+
+  // Pre-compute total bytes so we can report accurate progress.
+  // Folders via FileSystemDirectoryHandle have size=0 in the FileInfo,
+  // so we scan them first to get the real total.
+  let totalBytes = 0;
+  for (const fi of files) {
+    if (!fi.isDirectory) {
+      totalBytes += (fi.fileRef as File)?.size ?? fi.size;
+    } else if (Array.isArray(fi.fileRef)) {
+      totalBytes += (fi.fileRef as File[]).reduce((s, f) => s + f.size, 0);
+    }
+    // FileSystemDirectoryHandle size is tallied dynamically below
+  }
+  let sentBytes = 0;
 
   for (const fileInfo of files) {
     const fileRef = fileInfo.fileRef;
     if (!fileRef) continue;
 
     if (fileInfo.isDirectory) {
-      // FileSystemDirectoryHandle — use async generator
-      const dirHandle = fileRef as FileSystemDirectoryHandle;
+      if (Array.isArray(fileRef)) {
+        // Fallback: webkitdirectory gave us a flat Array<File> with webkitRelativePath set.
+        for (const file of fileRef as File[]) {
+          const entryId = crypto.randomUUID();
+          const relativePath = (file as any).webkitRelativePath
+            ? (file as any).webkitRelativePath.replace(/\\/g, '/')
+            : file.name;
 
-      for await (const { relativePath, isDirectory, file } of scanDirectory(dirHandle)) {
-        const entryId = crypto.randomUUID();
+          ws.send(JSON.stringify({
+            type: 'manifest-entry',
+            sessionId,
+            fileId: entryId,
+            path: relativePath,
+            size: file.size,
+            mtime: file.lastModified,
+            mimeType: file.type || 'application/octet-stream',
+            isDirectory: false,
+          }));
 
-        // Send manifest-entry control message
-        ws.send(JSON.stringify({
-          type: 'manifest-entry',
-          sessionId,
-          fileId: entryId,
-          path: relativePath,
-          size: file ? file.size : 0,
-          mtime: file ? file.lastModified : Date.now(),
-          mimeType: file ? (file.type || 'application/octet-stream') : '',
-          isDirectory,
-        }));
+          if (file.size > 0) {
+            let offset = 0;
+            while (offset < file.size) {
+              const slice = file.slice(offset, offset + CHUNK_SIZE);
+              const buffer = await slice.arrayBuffer();
 
-        if (!isDirectory && file && file.size > 0) {
-          // Stream raw binary chunks
-          let offset = 0;
-          while (offset < file.size) {
-            const slice = file.slice(offset, offset + CHUNK_SIZE);
-            const buffer = await slice.arrayBuffer();
+              const fileIdBytes = new TextEncoder().encode(entryId);
+              const chunkIndex = Math.floor(offset / CHUNK_SIZE);
+              const header = new ArrayBuffer(4 + fileIdBytes.byteLength + 4);
+              const view = new DataView(header);
+              view.setUint32(0, fileIdBytes.byteLength, false);
+              new Uint8Array(header, 4, fileIdBytes.byteLength).set(fileIdBytes);
+              view.setUint32(4 + fileIdBytes.byteLength, chunkIndex, false);
 
-            // Header: [4-byte fileId length][fileId UTF-8][4-byte chunkIndex][raw chunk]
-            const fileIdBytes = new TextEncoder().encode(entryId);
-            const chunkIndex = Math.floor(offset / CHUNK_SIZE);
-            const header = new ArrayBuffer(4 + fileIdBytes.byteLength + 4);
-            const view = new DataView(header);
-            view.setUint32(0, fileIdBytes.byteLength, false);
-            new Uint8Array(header, 4, fileIdBytes.byteLength).set(fileIdBytes);
-            view.setUint32(4 + fileIdBytes.byteLength, chunkIndex, false);
+              const combined = new Uint8Array(header.byteLength + buffer.byteLength);
+              combined.set(new Uint8Array(header), 0);
+              combined.set(new Uint8Array(buffer), header.byteLength);
 
-            const combined = new Uint8Array(header.byteLength + buffer.byteLength);
-            combined.set(new Uint8Array(header), 0);
-            combined.set(new Uint8Array(buffer), header.byteLength);
-
-            ws.send(combined.buffer);
-            offset += buffer.byteLength;
+              ws.send(combined.buffer);
+              sentBytes += buffer.byteLength;
+              onProgress?.(sentBytes, totalBytes, relativePath);
+              offset += buffer.byteLength;
+            }
           }
-        }
 
-        // Signal end of this file
-        ws.send(JSON.stringify({ type: 'file-complete', sessionId, fileId: entryId }));
-      }
+          ws.send(JSON.stringify({ type: 'file-complete', sessionId, fileId: entryId }));
+        }
+      } else {
+        // FileSystemDirectoryHandle — use async generator.
+        // Seed relativePath with the folder name so all paths are like "FolderName/file.ext".
+        const dirHandle = fileRef as FileSystemDirectoryHandle;
+
+        for await (const { relativePath, isDirectory, file } of scanDirectory(dirHandle, dirHandle.name)) {
+          // Dynamically add this file's size to the running total for directory handles
+          if (!isDirectory && file) totalBytes += file.size;
+
+          const entryId = crypto.randomUUID();
+
+          // Send manifest-entry control message
+          ws.send(JSON.stringify({
+            type: 'manifest-entry',
+            sessionId,
+            fileId: entryId,
+            path: relativePath,
+            size: file ? file.size : 0,
+            mtime: file ? file.lastModified : Date.now(),
+            mimeType: file ? (file.type || 'application/octet-stream') : '',
+            isDirectory,
+          }));
+
+          if (!isDirectory && file && file.size > 0) {
+            // Stream raw binary chunks
+            let offset = 0;
+            while (offset < file.size) {
+              const slice = file.slice(offset, offset + CHUNK_SIZE);
+              const buffer = await slice.arrayBuffer();
+
+              // Header: [4-byte fileId length][fileId UTF-8][4-byte chunkIndex][raw chunk]
+              const fileIdBytes = new TextEncoder().encode(entryId);
+              const chunkIndex = Math.floor(offset / CHUNK_SIZE);
+              const header = new ArrayBuffer(4 + fileIdBytes.byteLength + 4);
+              const view = new DataView(header);
+              view.setUint32(0, fileIdBytes.byteLength, false);
+              new Uint8Array(header, 4, fileIdBytes.byteLength).set(fileIdBytes);
+              view.setUint32(4 + fileIdBytes.byteLength, chunkIndex, false);
+
+              const combined = new Uint8Array(header.byteLength + buffer.byteLength);
+              combined.set(new Uint8Array(header), 0);
+              combined.set(new Uint8Array(buffer), header.byteLength);
+
+              ws.send(combined.buffer);
+              sentBytes += buffer.byteLength;
+              onProgress?.(sentBytes, totalBytes, relativePath);
+              offset += buffer.byteLength;
+            }
+          }
+
+          // Signal end of this file
+          ws.send(JSON.stringify({ type: 'file-complete', sessionId, fileId: entryId }));
+        }
+      } // end FileSystemDirectoryHandle branch
     } else {
       // Regular File object
       const file = fileRef as File;
@@ -468,7 +537,8 @@ export const lightningshareAPI = {
 
   startTransfer: async (
     deviceId: string,
-    files: FileInfo[]
+    files: FileInfo[],
+    onProgress?: (sentBytes: number, totalBytes: number, fileName: string) => void,
   ): Promise<{ success: boolean; sessionId?: string; error?: string }> => {
     return new Promise((resolve) => {
       const wsUrl = `ws://${location.host}/ws-stream`;
@@ -493,7 +563,7 @@ export const lightningshareAPI = {
             // kill large file streams that take longer than 10 seconds.
             clearTimeout(timeout);
             // Start streaming files but do not resolve yet
-            startStreamingSession(streamWs, msg.sessionId, files).catch((err) => {
+            startStreamingSession(streamWs, msg.sessionId, files, onProgress).catch((err) => {
               console.error('[StreamTransfer] Streaming error:', err);
               resolve({ success: false, error: 'Streaming to backend failed' });
             });
