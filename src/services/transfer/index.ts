@@ -1171,38 +1171,10 @@ export class TransferService extends EventEmitter {
   ): void {
     const metrics = session as any;
     const key = `${message.fileId}:${message.chunkIndex}`;
-    const sentAt = metrics.chunkSentAt?.get(key);
-    if (sentAt) {
-      const rttMs = Math.max(1, Date.now() - sentAt);
-      metrics.rttMs = metrics.rttMs
-        ? metrics.rttMs * 0.875 + rttMs * 0.125
-        : rttMs;
-      metrics.minRttMs = metrics.minRttMs
-        ? Math.min(metrics.minRttMs, rttMs)
-        : rttMs;
-      metrics.ackCount = (metrics.ackCount || 0) + 1;
-      metrics.chunkSentAt.delete(key);
-
-      const queuedBytes = socket.writableLength;
-      metrics.socketWritableLength = queuedBytes;
-      const rttCongested = metrics.minRttMs > 0 && metrics.rttMs > metrics.minRttMs * 2;
-      const queueCongested = queuedBytes > 16 * 1024 * 1024;
-      if (rttCongested || queueCongested) {
-        metrics.windowSize = Math.max(
-          MIN_TRANSFER_WINDOW_SIZE,
-          Math.floor(metrics.windowSize / 2),
-        );
-      } else if (
-        metrics.ackCount % 8 === 0 &&
-        queuedBytes < 2 * 1024 * 1024 &&
-        metrics.rttMs <= metrics.minRttMs * 1.25
-      ) {
-        metrics.windowSize = Math.min(
-          MAX_TRANSFER_WINDOW_SIZE,
-          metrics.windowSize + 1,
-        );
-      }
-    }
+    metrics.chunkSentAt?.delete(key);
+    metrics.socketWritableLength = socket.writableLength;
+    // Window adjustment based on RTT is disabled until we implement true network-only PING/PONG.
+    // Hardcoded window size (16) will act as the ceiling.
 
     const now = Date.now();
     const elapsedMs = now - (metrics.metricsLastAt || now);
@@ -1572,21 +1544,10 @@ export class TransferService extends EventEmitter {
     connectionKey: string,
     connection: ActiveConnection,
   ): void {
-    if (connection.timeout) clearTimeout(connection.timeout);
-    const metrics = session as any;
-    const timeoutMs = Math.max(2000, Math.min(10000, (metrics.rttMs || 500) * 3));
-    connection.timeout = setTimeout(async () => {
-      if (this.connections.get(connectionKey) !== connection) return;
-      if (connection.retries >= MAX_CHUNK_RETRIES) {
-        session.status = 'reconnecting';
-        session.error = `Chunk ${connection.chunkIndex} timed out after ${MAX_CHUNK_RETRIES} retries`;
-        this.emitSessionUpdate(session);
-        this.scheduleReconnect(session, session.error);
-        return;
-      }
-      connection.retries++;
-      await this.resendChunk(session, connection);
-    }, timeoutMs);
+    // Disabled. TCP guarantees in-order delivery.
+    // Application-level chunk retries over a reliable stream only 
+    // cause duplicate data and massive buffer bloat (up to 48MB seen).
+    // If the socket dies, handleConnection's close event will catch it.
   }
 
   private async sendMessage(socket: tls.TLSSocket | net.Socket, message: any): Promise<void> {
