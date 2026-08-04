@@ -789,12 +789,13 @@ export class TransferService extends EventEmitter {
         const prevWrite = this.writeQueues.get(queueKey) ?? Promise.resolve();
         const nextWrite = prevWrite.then(() =>
           writeHandle.write(chunkBuffer, 0, chunkBuffer.length, offset).then(() => {
-            const writeMs = Date.now() - t0;
+            const writeMs = Math.max(Date.now() - t0, 1);
+            const instWriteSpeed = chunkBuffer.length / (writeMs / 1000);
             const metrics = session as any;
-            metrics.writeBytes = (metrics.writeBytes || 0) + chunkBuffer.length;
-            metrics.writeStartedAt = metrics.writeStartedAt || t0;
-            metrics.writeSpeed = metrics.writeBytes / Math.max((Date.now() - metrics.writeStartedAt) / 1000, 0.001);
-            log.debug(`[WRITE_PERF] chunk=${chunkIndex} file=${fileId} writeMs=${writeMs} writeSpeed=${Math.round(metrics.writeSpeed / 1024 / 1024)}MB/s`);
+            metrics.writeSpeed = metrics.writeSpeed
+              ? Math.round(metrics.writeSpeed * 0.8 + instWriteSpeed * 0.2)
+              : instWriteSpeed;
+            log.debug(`[WRITE_PERF] chunk=${chunkIndex} file=${fileId} writeMs=${writeMs} instSpeed=${Math.round(instWriteSpeed / 1024 / 1024)}MB/s avgSpeed=${Math.round(metrics.writeSpeed / 1024 / 1024)}MB/s`);
           })
         ).catch((err) => {
           log.error(`[WRITE_QUEUE] Write error for chunk ${chunkIndex} of ${fileId}: ${err}`);
@@ -821,16 +822,48 @@ export class TransferService extends EventEmitter {
     session.lastAcknowledgedByte = contiguousBytes;
     session.acknowledgedChunks = resumeState.acknowledgedChunks;
 
-    // ACK is sent immediately — no disk wait.
-    this.sendMessage(socket, {
-      type: 'ack',
-      sessionId: message.sessionId,
-      fileId,
-      chunkIndex,
-      acknowledgedByte: contiguousBytes,
-      checksum,
-      valid: true,
-    });
+    // Batched ACK policy: flush ACK frame every 4 chunks, every 4 MB, on the last chunk,
+    // or via a 50ms trailing flush timer. Reduces protocol chatter by ~75%.
+    const isLastChunk = chunkIndex === fileChunks.length - 1;
+    (session as any).pendingAckCount = ((session as any).pendingAckCount || 0) + 1;
+    (session as any).pendingAckBytes = ((session as any).pendingAckBytes || 0) + chunkBuffer.length;
+
+    const shouldFlushAck = isLastChunk ||
+      (session as any).pendingAckCount >= 4 ||
+      (session as any).pendingAckBytes >= 4 * 1024 * 1024;
+
+    if (shouldFlushAck) {
+      (session as any).pendingAckCount = 0;
+      (session as any).pendingAckBytes = 0;
+      if ((session as any).ackFlushTimer) {
+        clearTimeout((session as any).ackFlushTimer);
+        (session as any).ackFlushTimer = null;
+      }
+      this.sendMessage(socket, {
+        type: 'ack',
+        sessionId: message.sessionId,
+        fileId,
+        chunkIndex,
+        acknowledgedByte: contiguousBytes,
+        checksum,
+        valid: true,
+      });
+    } else if (!(session as any).ackFlushTimer) {
+      (session as any).ackFlushTimer = setTimeout(() => {
+        (session as any).ackFlushTimer = null;
+        (session as any).pendingAckCount = 0;
+        (session as any).pendingAckBytes = 0;
+        this.sendMessage(socket, {
+          type: 'ack',
+          sessionId: message.sessionId,
+          fileId,
+          chunkIndex,
+          acknowledgedByte: contiguousBytes,
+          checksum,
+          valid: true,
+        });
+      }, 50);
+    }
 
     this.updateProgress(session);
   }
@@ -1443,6 +1476,8 @@ export class TransferService extends EventEmitter {
       );
       if (unacknowledged) {
         activeFile = af;
+        // Lock chunk immediately into inFlight set before async I/O to prevent duplicate dispatches
+        activeFile.inFlight.add(unacknowledged.index);
         break;
       }
     }
@@ -1473,6 +1508,7 @@ export class TransferService extends EventEmitter {
     const chunkData = await this.readChunkAhead(fileInfo, unacknowledged);
     this.chunkReadAhead.delete(`${fileInfo.id}:${unacknowledged.index}`);
     if (!chunkData) {
+      activeFile.inFlight.delete(unacknowledged.index);
       session.status = 'failed';
       session.error = `Failed to read chunk ${unacknowledged.index}`;
       this.emit('session-error', session.id, session.error);
@@ -1507,7 +1543,6 @@ export class TransferService extends EventEmitter {
 
     await this.consumeBandwidth(chunkData.length);
 
-    activeFile.inFlight.add(unacknowledged.index);
     if (!metrics.chunkSentAt) metrics.chunkSentAt = new Map();
     metrics.chunkSentAt.set(`${fileInfo.id}:${unacknowledged.index}`, Date.now());
 

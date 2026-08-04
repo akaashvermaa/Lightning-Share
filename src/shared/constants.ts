@@ -43,10 +43,10 @@ export const FILE_CHUNK_SIZES: Record<string, number> = {
 };
 
 export function getChunkSizeForFile(fileSize: number): number {
-  if (fileSize < 100 * 1024 * 1024)                return CHUNK_SIZE_SMALL;   // < 100 MB
-  if (fileSize < 4  * 1024 * 1024 * 1024)          return CHUNK_SIZE_MEDIUM;  // < 4 GB
-  if (fileSize < 20 * 1024 * 1024 * 1024)          return CHUNK_SIZE_LARGE;   // < 20 GB
-  return CHUNK_SIZE_HUGE;                                                       // ≥ 20 GB
+  if (fileSize < 50 * 1024 * 1024)                 return CHUNK_SIZE_SMALL;   // < 50 MB → 512 KB
+  if (fileSize < 2  * 1024 * 1024 * 1024)          return CHUNK_SIZE_MEDIUM;  // 50 MB–2 GB → 2 MB
+  if (fileSize < 20 * 1024 * 1024 * 1024)          return CHUNK_SIZE_LARGE;   // 2 GB–20 GB → 4 MB
+  return CHUNK_SIZE_HUGE;                                                       // ≥ 20 GB → 8 MB
 }
 
 export const COMPRESSIBLE_EXTENSIONS = [
