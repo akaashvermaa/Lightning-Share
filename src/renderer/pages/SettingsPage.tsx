@@ -4,229 +4,277 @@ import { useAppStore } from '../stores/appStore';
 
 export default function SettingsPage() {
   const { deviceName, settings, downloadPath, setSettings, setDeviceName, setDownloadPath } = useAppStore();
-  const [localName, setLocalName] = useState(deviceName);
-  const [isSaving, setIsSaving] = useState(false);
-  const [saveMessage, setSaveMessage] = useState<string | null>(null);
-  const [saveError, setSaveError] = useState<string | null>(null);
+  const [localName,       setLocalName]       = useState(deviceName);
+  const [localDlPath,     setLocalDlPath]     = useState(downloadPath);
+  const [localBandwidth,  setLocalBandwidth]  = useState(settings.bandwidthLimit || 0);
+  const [isSaving,        setIsSaving]        = useState(false);
+  const [saveMsg,         setSaveMsg]         = useState<string | null>(null);
+  const [saveErr,         setSaveErr]         = useState<string | null>(null);
 
-  useEffect(() => {
-    setLocalName(deviceName);
-  }, [deviceName]);
+  useEffect(() => { setLocalName(deviceName); }, [deviceName]);
+  useEffect(() => { setLocalDlPath(downloadPath); }, [downloadPath]);
+  useEffect(() => { setLocalBandwidth(settings.bandwidthLimit || 0); }, [settings.bandwidthLimit]);
 
-  const [localDownloadPath, setLocalDownloadPath] = useState(downloadPath);
-  const [localBandwidthLimit, setLocalBandwidthLimit] = useState(settings.bandwidthLimit || 0);
-
-  useEffect(() => {
-    setLocalDownloadPath(downloadPath);
-  }, [downloadPath]);
-
-  useEffect(() => {
-    setLocalBandwidthLimit(settings.bandwidthLimit || 0);
-  }, [settings.bandwidthLimit]);
+  const flash = (msg: string, err?: boolean) => {
+    if (err) { setSaveErr(msg); setSaveMsg(null); }
+    else     { setSaveMsg(msg); setSaveErr(null); }
+    setTimeout(() => { setSaveMsg(null); setSaveErr(null); }, 3000);
+  };
 
   const handleSaveName = async () => {
     if (!localName.trim() || localName.trim() === deviceName) return;
     setIsSaving(true);
-    setSaveMessage(null);
-    setSaveError(null);
     try {
       await window.lightningshare.setDeviceName(localName.trim());
       setDeviceName(localName.trim());
-      setSaveMessage('Device name updated');
-    } catch {
-      setSaveError('Could not update the device name');
-    } finally {
-      setIsSaving(false);
-    }
+      flash('Device name updated');
+    } catch { flash('Could not update device name', true); }
+    finally  { setIsSaving(false); }
   };
 
-  const handleSelectDownloadPath = async () => {
-    if (!localDownloadPath || localDownloadPath === downloadPath) return;
-    setSaveMessage(null);
-    setSaveError(null);
+  const handleSavePath = async () => {
+    if (!localDlPath || localDlPath === downloadPath) return;
     try {
-      const result = await window.lightningshare.setSettings({ downloadPath: localDownloadPath });
+      const result = await window.lightningshare.setSettings({ downloadPath: localDlPath });
       setDownloadPath(result.downloadPath);
-      setSaveMessage('Download location updated');
-    } catch {
-      setSaveError('Could not update the download location');
-    }
+      flash('Download location updated');
+    } catch { flash('Could not update download location', true); }
   };
 
   const handleSaveBandwidth = async () => {
-    const limit = Math.max(0, Math.round(Number(localBandwidthLimit) || 0));
+    const limit = Math.max(0, Math.round(Number(localBandwidth) || 0));
     try {
       await setSettings({ bandwidthLimit: limit });
-      setSaveMessage(limit ? 'Bandwidth limit updated' : 'Bandwidth limit removed');
-      setSaveError(null);
-    } catch {
-      setSaveError('Could not update the bandwidth limit');
-    }
+      flash(limit ? 'Bandwidth limit updated' : 'Bandwidth limit removed');
+    } catch { flash('Could not update bandwidth limit', true); }
   };
 
   return (
-    <div className="h-full flex flex-col">
-      <header className="bg-white border-b border-slate-200 px-4 sm:px-8 py-4">
-        <h2 className="text-2xl font-semibold text-slate-900">Settings</h2>
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      {/* Header */}
+      <header style={{
+        padding: '18px 28px 16px',
+        borderBottom: '1px solid rgba(255,255,255,0.06)',
+        flexShrink: 0,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+      }}>
+        <div>
+          <h2 style={{ fontSize: 17, fontWeight: 600, color: 'rgba(255,255,255,0.88)', letterSpacing: '-0.01em' }}>
+            Settings
+          </h2>
+          <p style={{ fontSize: 12, color: 'rgba(255,255,255,0.28)', marginTop: 3 }}>
+            Changes apply immediately to this device.
+          </p>
+        </div>
+        {/* Status feedback */}
+        {(saveMsg || saveErr) && (
+          <div style={{
+            padding: '7px 14px',
+            borderRadius: 8,
+            fontSize: 12.5,
+            fontWeight: 500,
+            background: saveErr ? 'rgba(255,80,80,0.08)' : 'rgba(74,222,128,0.08)',
+            border: `1px solid ${saveErr ? 'rgba(255,80,80,0.18)' : 'rgba(74,222,128,0.18)'}`,
+            color: saveErr ? 'rgba(255,120,120,0.85)' : '#4ade80',
+          }}>
+            {saveErr || saveMsg}
+          </div>
+        )}
       </header>
 
-      <div className="flex-1 overflow-auto p-4 sm:p-8">
-        <div className="max-w-2xl space-y-8">
-          <div className="rounded-xl border border-primary-100 bg-primary-50 px-4 py-3 flex items-start gap-3">
-            <svg className="w-5 h-5 text-primary-600 mt-0.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <circle cx="12" cy="12" r="10" />
-              <line x1="12" y1="16" x2="12" y2="12" />
-              <line x1="12" y1="8" x2="12.01" y2="8" />
-            </svg>
-            <p className="text-sm text-primary-800">Changes are applied immediately to this device and visible to new connections.</p>
-          </div>
-          {(saveMessage || saveError) && (
-            <p className={`text-sm ${saveError ? 'text-red-600' : 'text-green-600'}`} role="status">
-              {saveError || saveMessage}
-            </p>
-          )}
-          <section className="bg-white rounded-lg border border-slate-200 p-6">
-            <h3 className="text-lg font-medium text-slate-900 mb-4">Device Name</h3>
-            <p className="text-sm text-slate-500 mb-4">
-              This name is shown to other devices on the network.
-            </p>
-            <div className="flex items-center gap-3">
+      {/* Scrollable body */}
+      <div style={{ flex: 1, overflow: 'auto', padding: '24px 28px' }}>
+        <div style={{ maxWidth: 620, display: 'flex', flexDirection: 'column', gap: 12 }}>
+
+          {/* Device Name */}
+          <SettingCard title="Device name" description="This name is shown to other devices on your network.">
+            <div style={{ display: 'flex', gap: 10 }}>
               <input
                 type="text"
                 value={localName}
-                onChange={(e) => setLocalName(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') void handleSaveName();
-                }}
-                className="flex-1 px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+                onChange={e => setLocalName(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') void handleSaveName(); }}
                 placeholder="Enter device name"
+                className="input-field"
+                style={{ flex: 1 }}
               />
               <button
                 onClick={handleSaveName}
                 disabled={isSaving || localName === deviceName}
-                className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                className="btn-primary"
+                style={{ flexShrink: 0 }}
               >
                 {isSaving ? 'Saving...' : 'Save'}
               </button>
             </div>
-          </section>
+          </SettingCard>
 
-          <section className="bg-white rounded-lg border border-slate-200 p-6">
-            <h3 className="text-lg font-medium text-slate-900 mb-4">Download Location</h3>
-            <p className="text-sm text-slate-500 mb-4">
-              Files you receive will be saved to this folder.
-            </p>
-            <div className="flex items-center gap-3">
+          {/* Download location */}
+          <SettingCard title="Download location" description="Received files are saved to this folder.">
+            <div style={{ display: 'flex', gap: 10 }}>
               <input
                 type="text"
-                value={localDownloadPath}
-                onChange={(e) => setLocalDownloadPath(e.target.value)}
-                className="flex-1 px-4 py-2 bg-slate-50 border border-slate-200 rounded-lg text-slate-600 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
-                placeholder="C:\Users\Downloads"
+                value={localDlPath}
+                onChange={e => setLocalDlPath(e.target.value)}
+                placeholder="/Users/you/Downloads"
+                className="input-field"
+                style={{ flex: 1 }}
               />
               <button
-                onClick={handleSelectDownloadPath}
-                disabled={localDownloadPath === downloadPath}
-                className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                onClick={handleSavePath}
+                disabled={localDlPath === downloadPath}
+                className="btn-primary"
+                style={{ flexShrink: 0 }}
               >
                 Save
               </button>
             </div>
-          </section>
+          </SettingCard>
 
-          <section className="bg-white rounded-lg border border-slate-200 p-6">
-            <h3 className="text-lg font-medium text-slate-900 mb-4">Transfer Settings</h3>
-            <div className="space-y-4">
-              <label className="flex items-center justify-between">
+          {/* Transfer settings */}
+          <SettingCard title="Transfer" description="Performance and connection options.">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+
+              <ToggleRow
+                label="Compression"
+                detail="Compress compatible files during transfer to reduce transfer time."
+                checked={settings.compressionEnabled}
+                onToggle={() => setSettings({ compressionEnabled: !settings.compressionEnabled })}
+                id="toggle-compression"
+              />
+
+              <div className="divider" />
+
+              <ToggleRow
+                label="Auto-accept from trusted devices"
+                detail="Automatically accept incoming transfers from devices you have marked as trusted."
+                checked={settings.autoAcceptFromTrusted}
+                onToggle={() => setSettings({ autoAcceptFromTrusted: !settings.autoAcceptFromTrusted })}
+                id="toggle-auto-accept"
+              />
+
+              <div className="divider" />
+
+              {/* Bandwidth limit */}
+              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 20 }}>
                 <div>
-                  <span className="font-medium text-slate-700">Compression</span>
-                  <p className="text-sm text-slate-500">
-                    Automatically compress compatible files during transfer
+                  <p style={{ fontSize: 13.5, fontWeight: 500, color: 'rgba(255,255,255,0.75)', marginBottom: 3 }}>Bandwidth limit</p>
+                  <p style={{ fontSize: 12, color: 'rgba(255,255,255,0.30)', lineHeight: 1.5 }}>
+                    Upload limit in MB/s. Set to 0 for unlimited.
                   </p>
                 </div>
-                <button
-                  onClick={() => setSettings({ compressionEnabled: !settings.compressionEnabled })}
-                  role="switch"
-                  aria-checked={settings.compressionEnabled}
-                  aria-label="Toggle compression"
-                  className={`relative w-12 h-6 rounded-full transition-colors ${
-                    settings.compressionEnabled ? 'bg-primary-600' : 'bg-slate-300'
-                  }`}
-                >
-                  <span
-                    className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform ${
-                      settings.compressionEnabled ? 'left-7' : 'left-1'
-                    }`}
-                  />
-                </button>
-              </label>
-
-              <label className="flex items-center justify-between">
-                <div>
-                  <span className="font-medium text-slate-700">Auto-accept from trusted devices</span>
-                  <p className="text-sm text-slate-500">
-                    Automatically accept incoming transfers from known devices
-                  </p>
-                </div>
-                <button
-                  onClick={() => setSettings({ autoAcceptFromTrusted: !settings.autoAcceptFromTrusted })}
-                  role="switch"
-                  aria-checked={settings.autoAcceptFromTrusted}
-                  aria-label="Toggle auto-accept from trusted devices"
-                  className={`relative w-12 h-6 rounded-full transition-colors ${
-                    settings.autoAcceptFromTrusted ? 'bg-primary-600' : 'bg-slate-300'
-                  }`}
-                >
-                  <span
-                    className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform ${
-                      settings.autoAcceptFromTrusted ? 'left-7' : 'left-1'
-                    }`}
-                  />
-                </button>
-              </label>
-
-              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pt-2">
-                <div>
-                  <span className="font-medium text-slate-700">Bandwidth limit</span>
-                  <p className="text-sm text-slate-500">Optional upload limit in megabytes per second. Use 0 for unlimited.</p>
-                </div>
-                <div className="flex items-center gap-2 shrink-0">
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
                   <input
                     type="number"
-                    min="0"
-                    step="1"
-                    value={localBandwidthLimit ? Math.round(localBandwidthLimit / (1024 * 1024)) : 0}
-                    onChange={(event) => setLocalBandwidthLimit(Math.max(0, Number(event.target.value) || 0) * 1024 * 1024)}
-                    className="w-24 px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
-                    aria-label="Bandwidth limit in megabytes per second"
+                    min={0}
+                    step={1}
+                    value={localBandwidth ? Math.round(localBandwidth / (1024 * 1024)) : 0}
+                    onChange={e => setLocalBandwidth(Math.max(0, Number(e.target.value) || 0) * 1024 * 1024)}
+                    className="input-field"
+                    style={{ width: 80, textAlign: 'center' }}
+                    aria-label="Bandwidth limit in MB/s"
                   />
-                  <button onClick={() => void handleSaveBandwidth()} className="px-3 py-2 bg-slate-100 text-slate-700 rounded-lg text-sm font-medium hover:bg-slate-200">Save</button>
+                  <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.28)', flexShrink: 0 }}>MB/s</span>
+                  <button onClick={() => void handleSaveBandwidth()} className="btn-primary" style={{ padding: '8px 14px', fontSize: 12.5 }}>
+                    Save
+                  </button>
                 </div>
               </div>
             </div>
-          </section>
-          <section className="bg-white rounded-lg border border-slate-200 p-6">
-            <h3 className="text-lg font-medium text-slate-900 mb-4">About</h3>
-            <div className="text-sm text-slate-500 space-y-2">
-              <p><span className="font-medium text-slate-700">Version:</span> 1.0.0</p>
-              <p><span className="font-medium text-slate-700">Developer:</span> LightningShare Team</p>
-              <p className="pt-2">
-                LightningShare is a fast, reliable LAN file transfer application.
+          </SettingCard>
+
+          {/* About */}
+          <SettingCard title="About" description="">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {[
+                ['Version',     '1.0.0'],
+                ['License',     'MIT'],
+                ['Protocol',    'TCP / TLS (mDNS discovery)'],
+                ['Description', 'Local-network file transfer. No cloud, no relay, no accounts.'],
+              ].map(([k, v]) => (
+                <div key={k} style={{ display: 'flex', gap: 12 }}>
+                  <span style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.28)', minWidth: 90, flexShrink: 0 }}>{k}</span>
+                  <span style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.60)' }}>{v}</span>
+                </div>
+              ))}
+            </div>
+          </SettingCard>
+
+          {/* Developer diagnostics */}
+          <div
+            className="glass"
+            style={{ borderRadius: 12, padding: '16px 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}
+          >
+            <div>
+              <p style={{ fontSize: 13.5, fontWeight: 500, color: 'rgba(255,255,255,0.75)', marginBottom: 3 }}>Developer diagnostics</p>
+              <p style={{ fontSize: 12, color: 'rgba(255,255,255,0.30)', lineHeight: 1.5 }}>
+                Inspect RTT, window size, compression ratio, and network health.
               </p>
             </div>
-          </section>
+            <Link to="/diagnostics" className="btn-ghost" style={{ textDecoration: 'none', fontSize: 12.5, flexShrink: 0 }}>
+              Open
+            </Link>
+          </div>
 
-          <section className="bg-slate-900 rounded-xl p-6 text-white">
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <h3 className="text-lg font-medium">Developer diagnostics</h3>
-                <p className="text-sm text-slate-300 mt-1">Inspect RTT, retries, window size, compression, and runtime health.</p>
-              </div>
-              <Link to="/diagnostics" className="shrink-0 px-3 py-2 bg-white/10 hover:bg-white/20 rounded-lg text-sm font-medium transition-colors">Open</Link>
-            </div>
-          </section>
         </div>
       </div>
     </div>
+  );
+}
+
+/* ─── Sub-components ─────────────────────────────────────────────────── */
+
+function SettingCard({ title, description, children }: { title: string; description: string; children: React.ReactNode }) {
+  return (
+    <div className="glass" style={{ borderRadius: 12, padding: '20px 22px' }}>
+      <div style={{ marginBottom: description ? 16 : 14 }}>
+        <p style={{ fontSize: 13.5, fontWeight: 600, color: 'rgba(255,255,255,0.80)', marginBottom: description ? 4 : 0 }}>{title}</p>
+        {description && <p style={{ fontSize: 12, color: 'rgba(255,255,255,0.30)', lineHeight: 1.5 }}>{description}</p>}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function ToggleRow({ label, detail, checked, onToggle, id }: { label: string; detail: string; checked: boolean; onToggle: () => void; id: string }) {
+  return (
+    <label htmlFor={id} style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 20, cursor: 'pointer' }}>
+      <div>
+        <p style={{ fontSize: 13.5, fontWeight: 500, color: 'rgba(255,255,255,0.75)', marginBottom: 3 }}>{label}</p>
+        <p style={{ fontSize: 12, color: 'rgba(255,255,255,0.30)', lineHeight: 1.5 }}>{detail}</p>
+      </div>
+      <button
+        id={id}
+        onClick={onToggle}
+        role="switch"
+        aria-checked={checked}
+        aria-label={label}
+        style={{
+          position: 'relative',
+          width: 40,
+          height: 22,
+          borderRadius: 100,
+          background: checked ? 'rgba(255,255,255,0.22)' : 'rgba(255,255,255,0.09)',
+          border: '1px solid rgba(255,255,255,0.12)',
+          cursor: 'pointer',
+          transition: 'background 180ms ease',
+          flexShrink: 0,
+          marginTop: 2,
+        }}
+      >
+        <span style={{
+          position: 'absolute',
+          top: 3,
+          left: checked ? 20 : 3,
+          width: 14,
+          height: 14,
+          borderRadius: '50%',
+          background: checked ? 'rgba(255,255,255,0.92)' : 'rgba(255,255,255,0.38)',
+          transition: 'left 180ms ease, background 180ms ease',
+        }} />
+      </button>
+    </label>
   );
 }
