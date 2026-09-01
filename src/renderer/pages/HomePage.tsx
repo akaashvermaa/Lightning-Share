@@ -176,7 +176,7 @@ export default function HomePage() {
               <p className="text-sm font-semibold text-amber-800">You're viewing another device's server</p>
               <p className="text-xs text-amber-700 mt-0.5">
                 To send or receive files <span className="font-semibold">from this device</span>, you must also run LightningShare on it.
-                Download and run <code className="px-1 py-0.5 bg-amber-100 rounded font-mono">start.bat</code> on this machine, then open{' '}
+                Run <code className="px-1 py-0.5 bg-amber-100 rounded font-mono">npm start</code> on this machine, then open{' '}
                 <code className="px-1 py-0.5 bg-amber-100 rounded font-mono">http://localhost:{serverInfo?.port || 51236}</code> in this browser.
               </p>
             </div>
@@ -203,7 +203,7 @@ export default function HomePage() {
               <p className="text-sm font-medium text-blue-900 mb-2">How to connect another device:</p>
               <ol className="text-sm text-blue-700 space-y-1 list-decimal list-inside">
                 <li>Install LightningShare on the other device</li>
-                <li>Run <code className="px-1.5 py-0.5 bg-blue-100 rounded font-mono text-xs">npm run launch</code> or double-click <code className="px-1.5 py-0.5 bg-blue-100 rounded font-mono text-xs">start.bat</code></li>
+                <li>Run <code className="px-1.5 py-0.5 bg-blue-100 rounded font-mono text-xs">npm start</code></li>
                 <li>Or open this URL in the other device's browser: <span className="font-mono text-xs break-all">{serverInfo?.url}</span></li>
               </ol>
             </div>
