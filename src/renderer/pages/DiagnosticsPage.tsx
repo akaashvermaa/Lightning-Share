@@ -42,62 +42,78 @@ export default function DiagnosticsPage() {
 
   useEffect(() => {
     void refresh();
-    const timer = setInterval(() => void refresh(), 1000); // 1s refresh for live graph
+    const timer = setInterval(() => void refresh(), 1000);
     return () => clearInterval(timer);
   }, [refresh]);
 
   return (
-    <div className="h-full flex flex-col">
-      <header className="bg-white border-b border-slate-200 px-4 sm:px-8 py-4 flex items-center justify-between gap-3">
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      {/* Header */}
+      <header style={{
+        padding: '18px 28px 16px',
+        borderBottom: '1px solid rgba(255,255,255,0.06)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        flexShrink: 0,
+      }}>
         <div>
-          <div className="flex items-center gap-2">
-            <Link to="/settings" className="text-sm text-slate-400 hover:text-primary-600">Settings</Link>
-            <span className="text-slate-300">/</span>
-            <h2 className="text-2xl font-semibold text-slate-900">Diagnostics</h2>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+            <Link to="/settings" style={{ fontSize: 12, color: 'rgba(255,255,255,0.30)', textDecoration: 'none' }}>Settings</Link>
+            <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.20)' }}>/</span>
+            <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.60)' }}>Diagnostics</span>
           </div>
-          <p className="text-sm text-slate-500 mt-1">Live engine data for troubleshooting slow or interrupted transfers.</p>
+          <h2 style={{ fontSize: 17, fontWeight: 600, color: 'rgba(255,255,255,0.88)', letterSpacing: '-0.01em' }}>
+            Engine Diagnostics
+          </h2>
         </div>
+
         <button
           onClick={() => window.lightningshare.exportDiagnostics()}
-          className="px-3 py-2 bg-primary-600 text-white rounded-lg text-sm font-medium hover:bg-primary-700 transition-colors shadow-sm"
+          className="btn-primary"
+          style={{ fontSize: 12.5, padding: '7px 14px' }}
         >
           Export report
         </button>
       </header>
 
-      <div className="flex-1 overflow-auto p-4 sm:p-8 bg-slate-50/50">
-        {error && <div className="mb-4 rounded-lg bg-red-50 border border-red-100 text-red-700 text-sm p-3 shadow-sm">{error}</div>}
+      {/* Body */}
+      <div style={{ flex: 1, overflow: 'auto', padding: '24px 28px' }}>
+        {error && (
+          <div style={{ padding: '10px 14px', borderRadius: 8, background: 'rgba(255,80,80,0.08)', border: '1px solid rgba(255,80,80,0.18)', color: 'rgba(255,120,120,0.85)', fontSize: 12.5, marginBottom: 16 }}>
+            {error}
+          </div>
+        )}
+
         {!report ? (
-          <div className="flex justify-center items-center h-32">
-            <div className="text-sm text-slate-500 animate-pulse">Collecting diagnostics...</div>
+          <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: 160 }}>
+            <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.30)' }}>Collecting diagnostics...</span>
           </div>
         ) : (
-          <div className="max-w-6xl space-y-6 mx-auto pb-12">
-            
-            {/* 1. Live Speed Graphs */}
+          <div style={{ maxWidth: 900, display: 'flex', flexDirection: 'column', gap: 16 }}>
+
+            {/* Live speed graphs for active transfers */}
             {report.transfers.filter(t => t.status === 'transferring').length > 0 && (
-              <div className="grid gap-4 lg:grid-cols-2">
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))', gap: 14 }}>
                 {report.transfers.filter(t => t.status === 'transferring').map(t => (
-                  <div key={t.id} className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
-                    <div className="flex items-center justify-between mb-4">
-                      <div>
-                        <h3 className="font-semibold text-slate-800 flex items-center gap-2">
-                          {t.deviceName}
-                          <span className={`text-[10px] font-bold text-white px-2 py-0.5 rounded-full uppercase tracking-wider ${t.direction === 'sending' ? 'bg-blue-500' : 'bg-purple-500'}`}>
-                            {t.direction}
-                          </span>
-                        </h3>
-                      </div>
+                  <div key={t.id} className="glass" style={{ borderRadius: 12, padding: '18px 20px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                      <span style={{ fontSize: 13.5, fontWeight: 600, color: 'rgba(255,255,255,0.82)' }}>
+                        {t.deviceName}
+                      </span>
+                      <span style={{ fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 100, background: 'rgba(255,255,255,0.08)', color: 'rgba(255,255,255,0.50)', textTransform: 'uppercase' }}>
+                        {t.direction}
+                      </span>
                     </div>
-                    <LiveSpeedGraph 
-                      data={t.speedHistory || []} 
-                      height={180} 
-                      color={t.direction === 'sending' ? '#3b82f6' : '#a855f7'}
-                    />
-                    <div className="grid grid-cols-4 gap-4 mt-6 pt-4 border-t border-slate-100 bg-slate-50 -mx-5 -mb-5 p-4 rounded-b-xl">
-                      <DiagnosticMetric label="Chunk ACK" value={`${Math.round(t.rttMs)} ms`} />
-                      <DiagnosticMetric label="Window Size" value={`${t.windowSize}`} />
-                      <DiagnosticMetric label="TCP Queued" value={formatBytes(t.queuedBytes)} />
+
+                    <div style={{ background: 'rgba(255,255,255,0.03)', borderRadius: 8, padding: '8px 10px', border: '1px solid rgba(255,255,255,0.06)' }}>
+                      <LiveSpeedGraph data={t.speedHistory || []} height={140} color={t.direction === 'sending' ? 'rgba(255,255,255,0.70)' : 'rgba(234,179,8,0.70)'} />
+                    </div>
+
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, marginTop: 12 }}>
+                      <DiagnosticMetric label="ACK RTT" value={`${Math.round(t.rttMs)} ms`} />
+                      <DiagnosticMetric label="Window" value={`${t.windowSize}`} />
+                      <DiagnosticMetric label="Queued" value={formatBytes(t.queuedBytes)} />
                       <DiagnosticMetric label="Retries" value={`${t.retryCount}`} />
                     </div>
                   </div>
@@ -105,91 +121,89 @@ export default function DiagnosticsPage() {
               </div>
             )}
 
-            <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm mb-6">
-              <h3 className="font-semibold text-slate-800 mb-2 flex items-center gap-2">
-                <svg className="w-5 h-5 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+            {/* System Benchmark */}
+            <div className="glass" style={{ borderRadius: 12, padding: '20px 22px' }}>
+              <p style={{ fontSize: 13.5, fontWeight: 600, color: 'rgba(255,255,255,0.80)', marginBottom: 4 }}>
                 System Benchmark
-              </h3>
-              <p className="text-sm text-slate-500 mb-4">Test your local disk and network speed to see if they are bottlenecking your transfers.</p>
-              
-              <button 
+              </p>
+              <p style={{ fontSize: 12, color: 'rgba(255,255,255,0.30)', marginBottom: 16, lineHeight: 1.5 }}>
+                Test local disk read/write and network loopback speed to detect bottlenecks.
+              </p>
+
+              <button
                 onClick={async () => {
                   setBenchmarkStatus('Running benchmark...');
                   try {
                     const results = await window.lightningshare.runBenchmark();
                     setBenchmarkResults(results);
                     setBenchmarkStatus(null);
-                  } catch (e) {
+                  } catch {
                     setBenchmarkStatus('Failed to run benchmark');
                   }
                 }}
                 disabled={!!benchmarkStatus}
-                className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 disabled:opacity-50 transition-colors"
+                className="btn-primary"
+                style={{ fontSize: 12.5 }}
               >
                 {benchmarkStatus || 'Run Benchmark'}
               </button>
 
               {benchmarkResults && (
-                <div className="grid grid-cols-3 gap-4 mt-6 pt-4 border-t border-slate-100">
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10, marginTop: 16, paddingTop: 14, borderTop: '1px solid rgba(255,255,255,0.06)' }}>
                   <DiagnosticMetric label="Disk Read" value={`${Math.round(benchmarkResults.readSpeedMBps)} MB/s`} />
                   <DiagnosticMetric label="Disk Write" value={`${Math.round(benchmarkResults.writeSpeedMBps)} MB/s`} />
-                  <DiagnosticMetric label="Network (Loopback)" value={`${Math.round(benchmarkResults.networkSpeedMBps)} MB/s`} />
+                  <DiagnosticMetric label="Network Loopback" value={`${Math.round(benchmarkResults.networkSpeedMBps)} MB/s`} />
                 </div>
               )}
             </div>
 
-
             {/* Transfer Statistics Table */}
-            <section className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
-              <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50">
-                <h3 className="font-semibold text-slate-800">Transfer Statistics</h3>
-                <span className="text-xs text-slate-400">Updated {new Date(report.generatedAt).toLocaleTimeString()}</span>
+            <div className="glass" style={{ borderRadius: 12, overflow: 'hidden' }}>
+              <div style={{ padding: '14px 20px', borderBottom: '1px solid rgba(255,255,255,0.06)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <p className="text-label">Transfer session log</p>
+                <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.22)' }}>
+                  {new Date(report.generatedAt).toLocaleTimeString()}
+                </span>
               </div>
+
               {report.transfers.length === 0 ? (
-                <p className="p-6 text-sm text-slate-500 text-center">No transfer sessions recorded.</p>
+                <p style={{ padding: '24px 20px', fontSize: 12.5, color: 'rgba(255,255,255,0.28)', textAlign: 'center' }}>
+                  No transfer sessions recorded in this session.
+                </p>
               ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead className="bg-white border-b border-slate-100 text-xs uppercase tracking-wider text-slate-400">
-                      <tr>
-                        <th className="text-left px-5 py-3">Session</th>
-                        <th className="text-left px-5 py-3">Status</th>
-                        <th className="text-left px-5 py-3">Bottleneck</th>
-                        <th className="text-right px-5 py-3">Chunk ACK</th>
-                        <th className="text-right px-5 py-3">Window</th>
-                        <th className="text-right px-5 py-3">In Flight</th>
-                        <th className="text-right px-5 py-3">Retries</th>
-                        <th className="text-right px-5 py-3">Compression</th>
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                    <thead>
+                      <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.06)', textAlign: 'left', color: 'rgba(255,255,255,0.28)' }}>
+                        <th style={{ padding: '10px 16px', fontWeight: 600 }}>Device</th>
+                        <th style={{ padding: '10px 16px', fontWeight: 600 }}>Status</th>
+                        <th style={{ padding: '10px 16px', fontWeight: 600 }}>Bottleneck</th>
+                        <th style={{ padding: '10px 16px', fontWeight: 600, textAlign: 'right' }}>ACK RTT</th>
+                        <th style={{ padding: '10px 16px', fontWeight: 600, textAlign: 'right' }}>Window</th>
+                        <th style={{ padding: '10px 16px', fontWeight: 600, textAlign: 'right' }}>In Flight</th>
+                        <th style={{ padding: '10px 16px', fontWeight: 600, textAlign: 'right' }}>Retries</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-slate-100">
+                    <tbody>
                       {report.transfers.map((t: any) => (
-                        <tr key={t.id} className="hover:bg-slate-50 transition-colors">
-                          <td className="px-5 py-4 text-slate-700">
-                            <span className="font-medium">{t.deviceName}</span>
-                            <span className="block text-[10px] uppercase font-bold text-slate-400 mt-1">{t.direction}</span>
+                        <tr key={t.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)', color: 'rgba(255,255,255,0.65)' }}>
+                          <td style={{ padding: '10px 16px' }}>
+                            <span style={{ fontWeight: 500, color: 'rgba(255,255,255,0.85)' }}>{t.deviceName}</span>
+                            <span style={{ display: 'block', fontSize: 10, color: 'rgba(255,255,255,0.28)', textTransform: 'uppercase', marginTop: 1 }}>{t.direction}</span>
                           </td>
-                          <td className="px-5 py-4">
-                            <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-bold uppercase tracking-wide ${
-                              t.status === 'transferring' ? 'bg-green-100 text-green-700' :
-                              t.status === 'failed' || t.status === 'declined' || t.status === 'cancelled' ? 'bg-red-100 text-red-700' :
-                              t.status === 'completed' ? 'bg-emerald-50 text-emerald-600' :
-                              'bg-slate-100 text-slate-600'
-                            }`}>
+                          <td style={{ padding: '10px 16px' }}>
+                            <span style={{ fontSize: 11, color: t.status === 'transferring' || t.status === 'completed' ? '#4ade80' : t.status === 'failed' ? 'rgba(255,100,100,0.80)' : 'rgba(255,255,255,0.38)' }}>
                               {t.status}
                             </span>
                           </td>
-                          <td className="px-5 py-4 text-xs font-mono text-slate-600">
+                          <td style={{ padding: '10px 16px', fontFamily: 'monospace', fontSize: 11, color: 'rgba(255,255,255,0.35)' }}>
                             {t.currentBottleneck || 'Idle'}
                           </td>
-                          <td className="px-5 py-4 text-right font-mono text-slate-600">{Math.round(t.rttMs)} ms</td>
-                          <td className="px-5 py-4 text-right font-mono text-slate-600">{t.windowSize}</td>
-                          <td className="px-5 py-4 text-right font-mono text-slate-600">{t.inFlightChunks}</td>
-                          <td className="px-5 py-4 text-right font-mono text-slate-600">
-                            <span className={t.retryCount > 0 ? 'text-amber-600 font-bold' : ''}>{t.retryCount}</span>
-                          </td>
-                          <td className="px-5 py-4 text-right font-mono text-slate-600">
-                            {t.compressionRatio < 1 ? `${Math.round(t.compressionRatio * 100)}%` : 'None'}
+                          <td style={{ padding: '10px 16px', textAlign: 'right', fontFamily: 'monospace' }}>{Math.round(t.rttMs)} ms</td>
+                          <td style={{ padding: '10px 16px', textAlign: 'right', fontFamily: 'monospace' }}>{t.windowSize}</td>
+                          <td style={{ padding: '10px 16px', textAlign: 'right', fontFamily: 'monospace' }}>{t.inFlightChunks}</td>
+                          <td style={{ padding: '10px 16px', textAlign: 'right', fontFamily: 'monospace', color: t.retryCount > 0 ? 'rgba(234,179,8,0.80)' : 'inherit' }}>
+                            {t.retryCount}
                           </td>
                         </tr>
                       ))}
@@ -197,7 +211,8 @@ export default function DiagnosticsPage() {
                   </table>
                 </div>
               )}
-            </section>
+            </div>
+
           </div>
         )}
       </div>
@@ -207,9 +222,9 @@ export default function DiagnosticsPage() {
 
 function DiagnosticMetric({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex flex-col">
-      <span className="text-xs font-medium text-slate-400 uppercase tracking-wide mb-1.5">{label}</span>
-      <span className="font-semibold text-slate-700 truncate">{value}</span>
+    <div style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 8, padding: '8px 10px' }}>
+      <p style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.28)', marginBottom: 2 }}>{label}</p>
+      <p style={{ fontSize: 12.5, fontWeight: 500, color: 'rgba(255,255,255,0.75)' }}>{value}</p>
     </div>
   );
 }
