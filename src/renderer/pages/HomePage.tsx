@@ -16,8 +16,6 @@ export default function HomePage() {
   const [copied, setCopied] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
-  // Detect if the user is accessing this server from a different device's browser.
-  // In that case they can't send/receive files because they have no local transfer server.
   const isRemoteBrowser = serverInfo
     ? !serverInfo.allAddresses?.some((addr: string) => addr === window.location.hostname) &&
       window.location.hostname !== 'localhost' &&
@@ -71,152 +69,216 @@ export default function HomePage() {
   const recentCompleted = sessions.filter(s => s.status === 'completed').slice(-3);
 
   return (
-    <div className="h-full flex flex-col">
-      <header className="bg-white border-b border-slate-200 px-4 sm:px-8 py-4">
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <div className="flex items-center gap-2">
-              <h2 className="text-2xl font-semibold text-slate-900">Nearby Devices</h2>
-              <span className="px-2 py-0.5 rounded-full bg-slate-100 text-xs font-semibold text-slate-500">{devices.length}</span>
-            </div>
-            <p className="text-sm text-slate-500 mt-1">
-              Your IP: <span className="font-mono text-slate-600">{localIp || serverInfo?.localIp}</span>
-            </p>
-          </div>
-          <div className="flex items-center gap-2 sm:gap-3">
-            <button
-              onClick={handleRefresh}
-              disabled={isRefreshing}
-              className="p-2 text-slate-400 hover:text-primary-600 hover:bg-primary-50 rounded-lg transition-colors disabled:opacity-50"
-              title="Refresh nearby devices"
-              aria-label="Refresh nearby devices"
-            >
-              <svg className={`w-5 h-5 ${isRefreshing ? 'animate-spin' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 13a8.1 8.1 0 0 0 15.5 2" />
-                <polyline points="16 3 20 3 20 7" />
-                <polyline points="8 21 4 21 4 17" />
-              </svg>
-            </button>
-            {serverInfo && (
-              <button
-                onClick={handleCopyUrl}
-                className="hidden sm:flex items-center gap-2 max-w-[220px] px-3 py-1.5 bg-blue-50 text-blue-600 rounded-full text-sm hover:bg-blue-100 transition-colors"
-                title="Click to copy server URL"
-              >
-                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
-                  <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
-                </svg>
-                <span className="truncate">{copied ? 'Copied!' : serverInfo.url}</span>
-              </button>
-            )}
-            <span className="flex items-center gap-2 px-3 py-1.5 bg-green-50 text-green-600 rounded-full text-sm">
-              <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
-              {serverInfo?.running ? 'Server Live' : 'Online'}
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+
+      {/* Header */}
+      <header style={{
+        padding: '20px 28px 18px',
+        borderBottom: '1px solid rgba(255,255,255,0.06)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 16,
+        flexShrink: 0,
+      }}>
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <h2 style={{ fontSize: 17, fontWeight: 600, color: 'rgba(255,255,255,0.88)', letterSpacing: '-0.01em' }}>
+              Nearby Devices
+            </h2>
+            <span style={{
+              fontSize: 11,
+              fontWeight: 600,
+              padding: '2px 8px',
+              borderRadius: 100,
+              background: 'rgba(255,255,255,0.07)',
+              color: 'rgba(255,255,255,0.38)',
+              border: '1px solid rgba(255,255,255,0.09)',
+            }}>
+              {devices.length}
             </span>
           </div>
+          {(localIp || serverInfo?.localIp) && (
+            <p style={{ fontSize: 12, color: 'rgba(255,255,255,0.28)', marginTop: 4, fontFamily: 'monospace' }}>
+              {localIp || serverInfo?.localIp}
+            </p>
+          )}
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          {/* Server status */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+            <span
+              className="dot-online animate-pulse-dot"
+              style={{ opacity: serverInfo?.running ? 1 : 0.3 }}
+            />
+            <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.35)' }}>
+              {serverInfo?.running ? 'server running' : 'offline'}
+            </span>
+          </div>
+
+          {/* Copy URL */}
+          {serverInfo?.url && (
+            <button
+              onClick={handleCopyUrl}
+              className="btn-ghost"
+              style={{ fontSize: 12, padding: '6px 12px', display: 'flex', alignItems: 'center', gap: 6 }}
+              title="Copy server URL"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+              </svg>
+              {copied ? 'Copied' : 'Copy URL'}
+            </button>
+          )}
+
+          {/* Refresh */}
+          <button
+            onClick={handleRefresh}
+            disabled={isRefreshing}
+            className="btn-ghost"
+            style={{ padding: '7px 10px' }}
+            title="Refresh devices"
+            aria-label="Refresh devices"
+          >
+            <svg
+              width="14" height="14"
+              viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+              style={{ display: 'block', animation: isRefreshing ? 'spin 0.75s linear infinite' : 'none' }}
+            >
+              <path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 13a8.1 8.1 0 0 0 15.5 2" />
+              <polyline points="16 3 20 3 20 7" />
+              <polyline points="8 21 4 21 4 17" />
+            </svg>
+          </button>
         </div>
       </header>
 
-      {serverInfo && (
-        <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border-b border-blue-100 px-4 sm:px-8 py-3">
-          <div className="flex items-center justify-between flex-wrap gap-2">
-            <div className="flex items-center gap-3">
-              <div className="w-9 h-9 bg-blue-500 rounded-lg flex items-center justify-center flex-shrink-0">
-                <svg className="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M5 12.55a11 11 0 0 1 14.08 0" />
-                  <path d="M1.42 9a16 16 0 0 1 21.16 0" />
-                  <path d="M8.53 16.11a6 6 0 0 1 6.95 0" />
-                  <line x1="12" y1="20" x2="12.01" y2="20" />
-                </svg>
-              </div>
-              <div>
-                <p className="text-sm font-medium text-slate-800">
-                  LightningShare server is running
-                </p>
-                <p className="text-xs text-slate-500">
-                  Other devices can find you at <span className="font-mono font-medium text-blue-600">{serverInfo.url}</span>
-                  {serverInfo.allAddresses?.length > 1 && (
-                    <span> or </span>
-                  )}
-                  {serverInfo.allAddresses?.slice(1).map((addr: string, i: number) => (
-                    <span key={i} className="font-mono font-medium text-blue-600">
-                      {i > 0 ? ', ' : ''}http://{addr}:{serverInfo.port}
-                    </span>
-                  ))}
-                </p>
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={handleCopyUrl}
-                className="px-3 py-1.5 text-xs font-medium text-blue-600 bg-white border border-blue-200 rounded-lg hover:bg-blue-50 transition-colors flex items-center gap-1.5"
-              >
-                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                </svg>
-                {copied ? 'Copied!' : 'Copy URL'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Remote browser warning: this device doesn't have a server running */}
+      {/* Remote browser warning */}
       {isRemoteBrowser && (
-        <div className="bg-amber-50 border-b border-amber-200 px-8 py-3">
-          <div className="flex items-start gap-3">
-            <svg className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-              <line x1="12" y1="9" x2="12" y2="13" />
-              <line x1="12" y1="17" x2="12.01" y2="17" />
-            </svg>
-            <div>
-              <p className="text-sm font-semibold text-amber-800">You're viewing another device's server</p>
-              <p className="text-xs text-amber-700 mt-0.5">
-                To send or receive files <span className="font-semibold">from this device</span>, you must also run LightningShare on it.
-                Run <code className="px-1 py-0.5 bg-amber-100 rounded font-mono">npm start</code> on this machine, then open{' '}
-                <code className="px-1 py-0.5 bg-amber-100 rounded font-mono">http://localhost:{serverInfo?.port || 51236}</code> in this browser.
-              </p>
-            </div>
+        <div style={{
+          padding: '10px 28px',
+          borderBottom: '1px solid rgba(255,255,255,0.05)',
+          background: 'rgba(255,200,50,0.05)',
+          display: 'flex',
+          alignItems: 'flex-start',
+          gap: 10,
+        }}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="rgba(255,200,50,0.60)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 1 }}>
+            <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+            <line x1="12" y1="9" x2="12" y2="13" />
+            <line x1="12" y1="17" x2="12.01" y2="17" />
+          </svg>
+          <div>
+            <p style={{ fontSize: 12.5, fontWeight: 500, color: 'rgba(255,200,50,0.75)' }}>
+              Viewing another device's server
+            </p>
+            <p style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.32)', marginTop: 2 }}>
+              Run <code style={{ fontFamily: 'monospace', background: 'rgba(255,255,255,0.07)', padding: '1px 5px', borderRadius: 4 }}>npm start</code> on this machine to send or receive files.
+            </p>
           </div>
         </div>
       )}
 
-      <div className="flex-1 overflow-auto p-4 sm:p-8">
+      {/* Device grid */}
+      <div style={{ flex: 1, overflow: 'auto', padding: '24px 28px' }}>
         {devices.length === 0 ? (
-          <div className="flex flex-col items-center justify-center min-h-[420px] h-full text-center">
-            <div className="w-24 h-24 bg-slate-100 rounded-full flex items-center justify-center mb-6">
-              <svg className="w-12 h-12 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                <rect x="2" y="2" width="20" height="8" rx="2" ry="2" />
-                <rect x="2" y="14" width="20" height="8" rx="2" ry="2" />
-                <line x1="6" y1="6" x2="6.01" y2="6" />
-                <line x1="6" y1="18" x2="6.01" y2="18" />
+          /* Empty state */
+          <div style={{
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            minHeight: 400,
+            textAlign: 'center',
+          }}>
+            <div style={{
+              width: 60,
+              height: 60,
+              borderRadius: 14,
+              background: 'rgba(255,255,255,0.04)',
+              border: '1px solid rgba(255,255,255,0.08)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              marginBottom: 18,
+            }}>
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.25)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M5 12.55a11 11 0 0 1 14.08 0" />
+                <path d="M1.42 9a16 16 0 0 1 21.16 0" />
+                <path d="M8.53 16.11a6 6 0 0 1 6.95 0" />
+                <line x1="12" y1="20" x2="12.01" y2="20" />
               </svg>
             </div>
-            <h3 className="text-lg font-medium text-slate-900 mb-2">No devices found</h3>
-            <p className="text-slate-500 max-w-sm">
-              Make sure other devices are connected to the same Wi-Fi network and running LightningShare.
+            <h3 style={{ fontSize: 15, fontWeight: 600, color: 'rgba(255,255,255,0.60)', marginBottom: 8 }}>
+              No devices found
+            </h3>
+            <p style={{ fontSize: 13, color: 'rgba(255,255,255,0.28)', maxWidth: 300, lineHeight: 1.6 }}>
+              Make sure other devices are on the same network and running LightningShare.
             </p>
-            <div className="mt-6 p-4 bg-blue-50 rounded-lg max-w-md text-left">
-              <p className="text-sm font-medium text-blue-900 mb-2">How to connect another device:</p>
-              <ol className="text-sm text-blue-700 space-y-1 list-decimal list-inside">
-                <li>Install LightningShare on the other device</li>
-                <li>Run <code className="px-1.5 py-0.5 bg-blue-100 rounded font-mono text-xs">npm start</code></li>
-                <li>Or open this URL in the other device's browser: <span className="font-mono text-xs break-all">{serverInfo?.url}</span></li>
+
+            {/* Quick guide */}
+            <div
+              className="glass"
+              style={{
+                marginTop: 24,
+                padding: '16px 20px',
+                borderRadius: 10,
+                textAlign: 'left',
+                maxWidth: 340,
+                width: '100%',
+              }}
+            >
+              <p className="text-label" style={{ marginBottom: 10 }}>Getting started</p>
+              <ol style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {[
+                  'Install LightningShare on another device',
+                  'Run npm start on that device',
+                  'Devices appear here automatically via mDNS',
+                ].map((step, i) => (
+                  <li key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                    <span style={{
+                      fontSize: 11,
+                      fontWeight: 600,
+                      color: 'rgba(255,255,255,0.30)',
+                      background: 'rgba(255,255,255,0.06)',
+                      borderRadius: 4,
+                      padding: '1px 6px',
+                      flexShrink: 0,
+                      marginTop: 1,
+                    }}>
+                      {i + 1}
+                    </span>
+                    <span style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.45)', lineHeight: 1.5 }}>{step}</span>
+                  </li>
+                ))}
               </ol>
+              {serverInfo?.url && (
+                <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+                  <p style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.28)', marginBottom: 4 }}>Or share this URL with another browser on the same network:</p>
+                  <p style={{ fontSize: 11.5, fontFamily: 'monospace', color: 'rgba(255,255,255,0.45)', wordBreak: 'break-all' }}>{serverInfo.url}</p>
+                </div>
+              )}
             </div>
           </div>
         ) : (
+          /* Device grid */
           <div>
-            <div className="flex items-center justify-between mb-4">
-              <p className="text-sm text-slate-500">Select a device to start a private transfer.</p>
-              <span className="text-xs font-medium text-green-600 flex items-center gap-1.5">
-                <span className="w-1.5 h-1.5 rounded-full bg-green-500" /> Network ready
-              </span>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 18 }}>
+              <p style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.30)' }}>
+                Select a device to start a transfer.
+              </p>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span className="dot-online" style={{ width: 6, height: 6 }} />
+                <span style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.30)' }}>network ready</span>
+              </div>
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))',
+              gap: 14,
+            }}>
               {devices.map(device => {
                 const isTrusted = settings.trustedDevices?.includes(device.id);
                 return (
@@ -227,7 +289,7 @@ export default function HomePage() {
                     disabled={isRemoteBrowser}
                     isTrusted={isTrusted}
                     onToggleTrust={() => {
-                      const newTrusted = isTrusted 
+                      const newTrusted = isTrusted
                         ? (settings.trustedDevices || []).filter(id => id !== device.id)
                         : [...(settings.trustedDevices || []), device.id];
                       setSettings({ trustedDevices: newTrusted });
@@ -240,48 +302,40 @@ export default function HomePage() {
         )}
       </div>
 
+      {/* Transfer activity bar */}
       {(activeTransfers.length > 0 || recentCompleted.length > 0) && (
-        <div className="border-t border-slate-200 bg-white p-4 max-h-64 overflow-auto">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-medium text-slate-700 flex items-center gap-2">
-              <svg className="w-4 h-4 text-blue-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <polyline points="17 1 21 5 17 9" />
-                <path d="M3 11V9a4 4 0 0 1 4-4h14" />
-                <polyline points="7 23 3 19 7 15" />
-                <path d="M21 13v2a4 4 0 0 1-4 4H3" />
-              </svg>
-              Transfer Activity
-            </h3>
-            <div className="flex items-center gap-3">
-              <Link to="/transfers" className="text-xs font-medium text-primary-600 hover:text-primary-700">View all</Link>
-              <span className="text-xs text-slate-400">
+        <div style={{
+          borderTop: '1px solid rgba(255,255,255,0.06)',
+          padding: '14px 28px',
+          maxHeight: 220,
+          overflow: 'auto',
+          flexShrink: 0,
+          background: 'rgba(255,255,255,0.02)',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+            <p className="text-label">Transfer activity</p>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <Link to="/transfers" style={{ fontSize: 12, color: 'rgba(255,255,255,0.40)', textDecoration: 'none' }}>
+                View all
+              </Link>
+              <span style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.22)' }}>
                 {activeTransfers.length} active · {recentCompleted.length} completed
               </span>
             </div>
           </div>
-          <div className="space-y-2">
-            {activeTransfers.map(session => (
-              <ActivityRow key={session.id} session={session} />
-            ))}
-            {recentCompleted.map(session => (
-              <ActivityRow key={session.id} session={session} />
-            ))}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {activeTransfers.map(session => <ActivityRow key={session.id} session={session} />)}
+            {recentCompleted.map(session => <ActivityRow key={session.id} session={session} />)}
           </div>
         </div>
       )}
 
       {incomingTransfers.map(transfer => (
-        <IncomingTransferToast
-          key={transfer.sessionId}
-          transfer={transfer}
-        />
+        <IncomingTransferToast key={transfer.sessionId} transfer={transfer} />
       ))}
 
       {isModalOpen && selectedDevice && (
-        <TransferModal
-          deviceId={selectedDevice}
-          onClose={handleModalClose}
-        />
+        <TransferModal deviceId={selectedDevice} onClose={handleModalClose} />
       )}
     </div>
   );
@@ -289,19 +343,20 @@ export default function HomePage() {
 
 function ActivityRow({ session }: { session: any }) {
   const progress = session.totalSize > 0 ? (session.transferredBytes / session.totalSize) * 100 : 0;
-  const isActive = session.status === 'transferring';
-  const isPaused = session.status === 'paused';
+  const isActive    = session.status === 'transferring';
+  const isPaused    = session.status === 'paused';
   const isCompleted = session.status === 'completed';
-  const isFailed = session.status === 'failed' || session.status === 'declined' || session.status === 'cancelled';
-  const isSending = session.direction === 'sending';
+  const isFailed    = ['failed', 'declined', 'cancelled'].includes(session.status);
+  const isSending   = session.direction === 'sending';
 
   return (
-    <div className={`bg-slate-50 rounded-lg p-3 border-l-2 ${
-      isFailed ? 'border-red-400' : isCompleted ? 'border-green-400' : isSending ? 'border-blue-400' : 'border-purple-400'
-    }`}>
-      <div className="flex items-center justify-between mb-1.5">
-        <div className="flex items-center gap-2 min-w-0">
-          <svg className={`w-3.5 h-3.5 flex-shrink-0 ${isSending ? 'text-blue-500' : 'text-purple-500'}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+    <div
+      className="glass"
+      style={{ borderRadius: 8, padding: '10px 14px' }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={isSending ? 'rgba(255,255,255,0.50)' : 'rgba(255,255,255,0.35)'} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             {isSending ? (
               <>
                 <line x1="22" y1="2" x2="11" y2="13" />
@@ -314,49 +369,39 @@ function ActivityRow({ session }: { session: any }) {
               </>
             )}
           </svg>
-          <span className="text-sm font-medium text-slate-700 truncate">
+          <span style={{ fontSize: 12.5, fontWeight: 500, color: 'rgba(255,255,255,0.72)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {session.files[0]?.name}
             {session.files.length > 1 && ` +${session.files.length - 1}`}
           </span>
-          <span className="text-xs text-slate-400 flex-shrink-0">
-            {isSending ? '→' : '←'} {session.deviceName}
+          <span style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.28)', flexShrink: 0 }}>
+            {isSending ? 'to' : 'from'} {session.deviceName}
           </span>
         </div>
-        <div className="flex items-center gap-2 text-xs flex-shrink-0">
-          {isActive && (
-            <span className="text-green-600 font-medium">{formatSpeed(session.speed)}</span>
-          )}
-          {isPaused && <span className="text-amber-500 font-medium">Paused</span>}
-          {isCompleted && <span className="text-green-600 font-medium">Done</span>}
-          {isFailed && <span className="text-red-500 font-medium">{session.status}</span>}
-          {!isActive && !isPaused && !isCompleted && !isFailed && (
-            <span className="text-slate-500">{session.status}</span>
-          )}
-          {session.error && (
-            <span className="text-red-400" title={session.error}>
-              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <circle cx="12" cy="12" r="10" />
-                <line x1="12" y1="8" x2="12" y2="12" />
-                <line x1="12" y1="16" x2="12.01" y2="16" />
-              </svg>
-            </span>
-          )}
-          <span className="text-slate-400 font-mono">
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11.5, flexShrink: 0 }}>
+          {isActive    && <span style={{ color: '#4ade80', fontWeight: 500 }}>{formatSpeed(session.speed)}</span>}
+          {isPaused    && <span style={{ color: 'rgba(255,200,50,0.70)' }}>paused</span>}
+          {isCompleted && <span style={{ color: '#4ade80' }}>done</span>}
+          {isFailed    && <span style={{ color: 'rgba(255,80,80,0.75)' }}>{session.status}</span>}
+          <span style={{ color: 'rgba(255,255,255,0.22)', fontFamily: 'monospace' }}>
             {formatBytes(session.transferredBytes)}/{formatBytes(session.totalSize)}
           </span>
         </div>
       </div>
-      <div className="h-1.5 bg-slate-200 rounded-full overflow-hidden">
+
+      {/* Progress track */}
+      <div className="progress-track">
         <div
-          className={`h-full rounded-full transition-all duration-300 ${
-            isCompleted ? 'bg-green-500' : isFailed ? 'bg-red-400' : isPaused ? 'bg-amber-400' : 'bg-blue-500'
-          }`}
+          className={`progress-fill${isCompleted ? ' success' : isFailed ? ' error' : isPaused ? ' paused' : ''}`}
           style={{ width: `${Math.min(progress, 100)}%` }}
         />
       </div>
+
       {isActive && session.remainingTime > 0 && (
-        <div className="text-right text-xs text-slate-400 mt-0.5">
-          {formatTime(session.remainingTime)} remaining · {progress.toFixed(0)}%
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 4 }}>
+          <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.22)' }}>
+            {formatTime(session.remainingTime)} remaining · {progress.toFixed(0)}%
+          </span>
         </div>
       )}
     </div>
@@ -364,8 +409,7 @@ function ActivityRow({ session }: { session: any }) {
 }
 
 function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 B';
-  if (!bytes || isNaN(bytes)) return '0 B';
+  if (!bytes || bytes === 0 || isNaN(bytes)) return '0 B';
   const k = 1024;
   const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));

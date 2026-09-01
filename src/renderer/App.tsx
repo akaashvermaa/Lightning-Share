@@ -13,7 +13,6 @@ declare global {
   }
 }
 
-
 export default function App() {
   const { initialize, setDevices, addDevice, removeDevice } = useAppStore();
   const { setSessions, updateSession } = useTransferStore();
@@ -46,22 +45,22 @@ export default function App() {
 
     const unsubSessionCompleted = window.lightningshare.onSessionCompleted((session) => {
       updateSession(session);
-      
-      const durationSecs = session.completedAt && session.startedAt 
+
+      const durationSecs = session.completedAt && session.startedAt
         ? Math.max(1, Math.round((session.completedAt - session.startedAt) / 1000))
         : 1;
       const avgSpeedMBps = (session.totalSize / durationSecs) / (1024 * 1024);
-      
+
       let durationStr = `${durationSecs}s`;
       if (durationSecs >= 60) {
         durationStr = `${Math.floor(durationSecs / 60)}m ${durationSecs % 60}s`;
       }
-      
+
       setCompletedNotice({
         name: session.files[0]?.name || 'Transfer',
         duration: durationStr,
         avgSpeed: `${Math.round(avgSpeedMBps)} MB/s`,
-        filePath: session.files[0]?.path
+        filePath: session.files[0]?.path,
       });
       window.setTimeout(() => setCompletedNotice(null), 8000);
     });
@@ -77,12 +76,9 @@ export default function App() {
       useTransferStore.getState().setIncomingTransfer(transfer);
     });
 
-    // Initial load
     window.lightningshare.getTransferSessions().then(setSessions);
     window.lightningshare.getDevices().then(setDevices);
 
-    // Periodic refresh: keeps device list in sync even when WS events are missed
-    // (e.g. if the other device started after this page loaded, or after a WS reconnect).
     const devicePollInterval = setInterval(() => {
       window.lightningshare.getDevices().then(setDevices).catch(() => {});
     }, 5000);
@@ -98,110 +94,185 @@ export default function App() {
     };
   }, []);
 
-
   return (
     <HashRouter>
-      <div className="app-shell flex h-screen bg-slate-50">
-        <nav className="w-64 bg-white border-r border-slate-200 flex flex-col">
-          <div className="p-6 border-b border-slate-200">
-            <Link to="/" className="text-xl font-bold text-primary-600 flex items-center gap-2">
-              <svg className="w-8 h-8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <div className="app-shell" style={{ background: '#0e0e11' }}>
+
+        {/* Sidebar */}
+        <nav
+          style={{
+            width: 220,
+            flexShrink: 0,
+            display: 'flex',
+            flexDirection: 'column',
+            borderRight: '1px solid rgba(255,255,255,0.07)',
+            background: 'rgba(255,255,255,0.025)',
+            backdropFilter: 'blur(16px)',
+            WebkitBackdropFilter: 'blur(16px)',
+          }}
+        >
+          {/* Wordmark */}
+          <div style={{ padding: '22px 20px 18px', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+            <Link to="/" style={{ textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 9 }}>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.80)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
               </svg>
-              <span>LightningShare</span>
+              <span style={{ fontSize: 14, fontWeight: 600, color: 'rgba(255,255,255,0.88)', letterSpacing: '-0.01em' }}>
+                LightningShare
+              </span>
             </Link>
           </div>
-          <div className="flex-1 p-4">
-            <NavLink to="/" icon="home" label="Home" />
+
+          {/* Nav */}
+          <div style={{ flex: 1, padding: '14px 12px' }}>
+            <NavLink to="/" icon="home" label="Devices" />
             <NavLink to="/transfers" icon="transfer" label="Transfers" />
             <NavLink to="/settings" icon="settings" label="Settings" />
           </div>
-          <div className="hidden lg:block p-4 border-t border-slate-100">
-            <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Private by design</p>
-            <p className="text-xs leading-5 text-slate-500 mt-1">Files move directly across your local network.</p>
+
+          {/* Footer note */}
+          <div style={{ padding: '14px 20px 20px', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+            <p className="text-label" style={{ marginBottom: 4 }}>Private by design</p>
+            <p style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.28)', lineHeight: 1.55 }}>
+              Files move directly across your local network. Nothing leaves your subnet.
+            </p>
           </div>
         </nav>
-        <main className="flex-1 overflow-hidden">
+
+        {/* Main content */}
+        <main style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
           <Routes>
-            <Route path="/" element={<HomePage />} />
-            <Route path="/transfers" element={<TransfersPage />} />
-            <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/"           element={<HomePage />} />
+            <Route path="/transfers"  element={<TransfersPage />} />
+            <Route path="/settings"   element={<SettingsPage />} />
             <Route path="/diagnostics" element={<DiagnosticsPage />} />
           </Routes>
         </main>
+
+        {/* Mobile bottom nav */}
         <div className="mobile-nav">
-          <NavLink to="/" icon="home" label="Home" />
+          <NavLink to="/" icon="home" label="Devices" />
           <NavLink to="/transfers" icon="transfer" label="Transfers" />
           <NavLink to="/settings" icon="settings" label="Settings" />
         </div>
-        {startedNotice && (
-          <div className="fixed bottom-20 sm:bottom-auto sm:top-4 right-4 z-40 w-[min(380px,calc(100vw-2rem))] bg-white border border-blue-200 rounded-xl shadow-xl p-4 animate-slide-in">
-            <div className="flex items-start gap-3">
-              <div className="w-9 h-9 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center shrink-0">
-                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
-                </svg>
-              </div>
-              <div className="min-w-0 flex-1">
-                <p className="font-semibold text-slate-800">
-                  {startedNotice.direction === 'sending' ? 'Sending Transfer Started' : 'Receiving Transfer Started'}
-                </p>
-                <p className="text-sm text-slate-500 truncate mt-0.5">{startedNotice.name}</p>
-                <p className="text-xs text-slate-400 mt-1">
-                  {startedNotice.direction === 'sending' ? 'To' : 'From'} {startedNotice.deviceName}
-                </p>
-                <div className="mt-3 flex gap-2">
-                  <Link to="/transfers" onClick={() => setStartedNotice(null)} className="flex-1 px-3 py-1.5 bg-blue-50 text-blue-700 font-medium text-sm rounded-lg hover:bg-blue-100 transition-colors text-center">
-                    View Progress
-                  </Link>
-                  <button onClick={() => setStartedNotice(null)} className="flex-1 px-3 py-1.5 bg-slate-100 text-slate-600 font-medium text-sm rounded-lg hover:bg-slate-200 transition-colors text-center">
-                    Dismiss
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-        {completedNotice && (
-          <div className="fixed bottom-20 sm:bottom-auto sm:top-4 right-4 z-40 w-[min(380px,calc(100vw-2rem))] bg-white border border-green-200 rounded-xl shadow-xl p-4 animate-slide-in">
-            <div className="flex items-start gap-3">
-              <div className="w-9 h-9 rounded-full bg-green-50 text-green-600 flex items-center justify-center shrink-0">
-                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="20 6 9 17 4 12" /></svg>
-              </div>
-              <div className="min-w-0 flex-1">
-                <p className="font-semibold text-slate-800">Transfer Complete</p>
-                
-                <div className="mt-3 bg-slate-50 rounded-lg p-3 border border-slate-100">
-                  <div className="flex justify-between text-sm mb-1.5">
-                    <span className="text-slate-500">Time</span>
-                    <span className="font-medium text-slate-700">{completedNotice.duration}</span>
-                  </div>
-                  <div className="flex justify-between text-sm">
-                    <span className="text-slate-500">Average Speed</span>
-                    <span className="font-medium text-slate-700">{completedNotice.avgSpeed}</span>
-                  </div>
-                </div>
 
-                <div className="mt-3 flex gap-2">
-                  {completedNotice.filePath && (
-                    <button 
-                      onClick={() => window.lightningshare.showFileInFolder(completedNotice.filePath!)}
-                      className="flex-1 px-3 py-1.5 bg-green-50 text-green-700 font-medium text-sm rounded-lg hover:bg-green-100 transition-colors text-center"
-                    >
-                      Open Folder
-                    </button>
-                  )}
-                  <button 
-                    onClick={() => setCompletedNotice(null)}
-                    className="flex-1 px-3 py-1.5 bg-slate-100 text-slate-600 font-medium text-sm rounded-lg hover:bg-slate-200 transition-colors text-center"
-                  >
-                    Dismiss
-                  </button>
+        {/* Toast — Transfer Started */}
+        {startedNotice && (
+          <div
+            className="animate-slide-in glass-heavy"
+            style={{
+              position: 'fixed',
+              bottom: 80,
+              right: 20,
+              zIndex: 50,
+              width: 'min(340px, calc(100vw - 40px))',
+              borderRadius: 12,
+              padding: '14px 16px',
+            }}
+          >
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <span style={{ fontSize: 13, fontWeight: 600, color: 'rgba(255,255,255,0.88)' }}>
+                  {startedNotice.direction === 'sending' ? 'Sending' : 'Receiving'}
+                </span>
+                <button
+                  onClick={() => setStartedNotice(null)}
+                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'rgba(255,255,255,0.30)', padding: 0 }}
+                  aria-label="Dismiss"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                </button>
+              </div>
+              <p style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.48)', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {startedNotice.name}
+              </p>
+              <p style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.30)' }}>
+                {startedNotice.direction === 'sending' ? 'To' : 'From'} {startedNotice.deviceName}
+              </p>
+              <Link
+                to="/transfers"
+                onClick={() => setStartedNotice(null)}
+                className="btn-ghost"
+                style={{ marginTop: 6, fontSize: 12, padding: '6px 12px' }}
+              >
+                View progress
+              </Link>
+            </div>
+          </div>
+        )}
+
+        {/* Toast — Transfer Completed */}
+        {completedNotice && (
+          <div
+            className="animate-slide-in glass-heavy"
+            style={{
+              position: 'fixed',
+              bottom: 80,
+              right: 20,
+              zIndex: 50,
+              width: 'min(340px, calc(100vw - 40px))',
+              borderRadius: 12,
+              padding: '14px 16px',
+            }}
+          >
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <span style={{ fontSize: 13, fontWeight: 600, color: 'rgba(255,255,255,0.88)' }}>
+                  Transfer complete
+                </span>
+                <button
+                  onClick={() => setCompletedNotice(null)}
+                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'rgba(255,255,255,0.30)', padding: 0 }}
+                  aria-label="Dismiss"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                </button>
+              </div>
+              <p style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.48)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {completedNotice.name}
+              </p>
+              <div
+                style={{
+                  marginTop: 6,
+                  padding: '10px 12px',
+                  background: 'rgba(255,255,255,0.04)',
+                  borderRadius: 8,
+                  border: '1px solid rgba(255,255,255,0.07)',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                }}
+              >
+                <div>
+                  <p style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.30)', marginBottom: 3 }}>Duration</p>
+                  <p style={{ fontSize: 13, fontWeight: 500, color: 'rgba(255,255,255,0.80)' }}>{completedNotice.duration}</p>
                 </div>
+                <div style={{ textAlign: 'right' }}>
+                  <p style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.30)', marginBottom: 3 }}>Avg Speed</p>
+                  <p style={{ fontSize: 13, fontWeight: 500, color: 'rgba(255,255,255,0.80)' }}>{completedNotice.avgSpeed}</p>
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+                {completedNotice.filePath && (
+                  <button
+                    onClick={() => window.lightningshare.showFileInFolder(completedNotice.filePath!)}
+                    className="btn-ghost"
+                    style={{ flex: 1, fontSize: 12, padding: '6px 12px' }}
+                  >
+                    Open folder
+                  </button>
+                )}
+                <button
+                  onClick={() => setCompletedNotice(null)}
+                  className="btn-ghost"
+                  style={{ flex: 1, fontSize: 12, padding: '6px 12px' }}
+                >
+                  Dismiss
+                </button>
               </div>
             </div>
           </div>
         )}
+
       </div>
     </HashRouter>
   );
@@ -213,13 +284,13 @@ function NavLink({ to, icon, label }: { to: string; icon: string; label: string 
 
   const icons: Record<string, JSX.Element> = {
     home: (
-      <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-        <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-        <polyline points="9 22 9 12 15 12 15 22" />
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="12" cy="12" r="3" />
+        <path d="M12 2v3M12 19v3M2 12h3M19 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1" />
       </svg>
     ),
     transfer: (
-      <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
         <polyline points="17 1 21 5 17 9" />
         <path d="M3 11V9a4 4 0 0 1 4-4h14" />
         <polyline points="7 23 3 19 7 15" />
@@ -227,24 +298,17 @@ function NavLink({ to, icon, label }: { to: string; icon: string; label: string 
       </svg>
     ),
     settings: (
-      <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
         <circle cx="12" cy="12" r="3" />
-        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
       </svg>
     ),
   };
 
   return (
-    <Link
-      to={to}
-      className={`flex items-center gap-3 px-4 py-3 rounded-lg mb-2 transition-colors ${
-        isActive
-          ? 'bg-primary-50 text-primary-600'
-          : 'text-slate-600 hover:bg-slate-100'
-      }`}
-    >
+    <Link to={to} className={`nav-link${isActive ? ' active' : ''}`}>
       {icons[icon]}
-      <span className="font-medium">{label}</span>
+      <span>{label}</span>
     </Link>
   );
 }
