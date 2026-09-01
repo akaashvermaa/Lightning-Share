@@ -82,6 +82,15 @@ npm run build
 npm start
 ```
 
+### Deploying to Vercel
+This repository includes a `vercel.json` configuration for zero-config Vercel deployment of the web client:
+
+1. Import the repository in [Vercel Dashboard](https://vercel.com/new).
+2. Framework Preset: **Vite**
+3. Build Command: `npm run build:vite`
+4. Output Directory: `dist/renderer`
+5. Click **Deploy**.
+
 ---
 
 ## Scripts Reference
