@@ -1,6 +1,8 @@
-# LightningShare
+# **[Lightning Share](https://github.com/akaashvermaa/Lightning-Share)**
 
-LightningShare is a high-throughput, zero-configuration local area network (LAN) file transfer engine and desktop interface. Built using Node.js, TypeScript, React, and native network protocols, it enables direct peer-to-peer file and folder transfers across local networks with zero cloud dependencies.
+A local-network file transfer tool for sharing files directly between devices without relying on removable storage or internet connectivity. Built around reliable TCP-based communication.
+
+`React` `TypeScript` `Node.js` `TCP` `Networking`
 
 ---
 
