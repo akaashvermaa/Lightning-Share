@@ -80,21 +80,6 @@ export default function App() {
           position: 'relative',
         }}
       >
-        {/* ── Background: yellow radial from bottom-left corner ── */}
-        <div
-          aria-hidden="true"
-          style={{
-            position: 'absolute',
-            inset: 0,
-            pointerEvents: 'none',
-            zIndex: 0,
-            background: `
-              radial-gradient(ellipse 55% 45% at 0% 100%, rgba(234, 179, 8, 0.13) 0%, transparent 70%),
-              radial-gradient(ellipse 30% 30% at 0% 100%, rgba(234, 179, 8, 0.07) 0%, transparent 55%)
-            `,
-          }}
-        />
-
         {/* ── Top navbar ── */}
         <header
           style={{
@@ -123,7 +108,7 @@ export default function App() {
               flexShrink: 0,
             }}
           >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="rgba(234,179,8,0.85)" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.80)" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
             </svg>
             <span style={{ fontSize: 13.5, fontWeight: 650, color: 'rgba(255,255,255,0.85)', letterSpacing: '-0.01em' }}>
@@ -154,7 +139,7 @@ export default function App() {
               width: 6,
               height: 6,
               borderRadius: '50%',
-              background: 'rgba(234,179,8,0.55)',
+              background: 'rgba(255,255,255,0.30)',
             }} />
           </div>
         </header>
